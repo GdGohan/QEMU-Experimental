@@ -1,0 +1,178 @@
+name: Build+Port Android-x86 4.4 (kitkat-x86) com SwiftShader (GLES 2.0 por software)
+
+# ============================================================================
+# LEIA ISTO PRIMEIRO
+# ============================================================================
+#
+# Objetivo: dar suporte a OpenGL ES 2.0 no android-x86 4.4 (kitkat-x86) SEM
+# depender de GPU/virtio-gpu - usando o SwiftShader (renderer 100% software,
+# via CPU) que o próprio projeto android-x86 mantém, só que integrado
+# oficialmente a partir do release 7.1, não do 4.4.
+#
+# Por que isso é mais viável que a tentativa de virtio-gpu/virgl:
+#   - SwiftShader é puramente userspace (uma libEGL/libGLESv2 alternativa).
+#     Não depende de driver de kernel, DRM, nem hardware nenhum.
+#   - O android-x86 mantém o SwiftShader num repositório git PRÓPRIO,
+#     versionado por branch, então dá pra buscar um branch já pronto (assim
+#     como fizemos com kernel-4.4 e drm_gralloc/virgl antes).
+#
+# Onde ainda pode quebrar (e por isso o job não aborta no erro, só loga):
+#   - O SwiftShader das versões mais novas do android-x86 (7.1+) foi escrito
+#     contra um C++ mais moderno que o toolchain antigo (GCC) empacotado no
+#     kitkat-x86 pode não suportar.
+#   - egl.cfg e o mecanismo de seleção de driver EGL podem ter mudado de
+#     formato entre 4.4 e 7.1 - pode ser necessário editar
+#     device/generic/x86/egl.cfg manualmente (ou equivalente) pra apontar
+#     pro swiftshader em vez do PixelFlinger.
+#   - gralloc do 4.4 pode não alocar buffer compatível com o que o
+#     SwiftShader espera (normalmente ashmem simples, que o gralloc do 4.4
+#     já suporta - mas é o tipo de coisa que só se confirma tentando).
+#
+# Se travar, o log completo sobe como artifact pra análise/patch manual.
+#
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: 'Numero de jobs paralelos do make (-j)'
+        required: false
+        default: '2'
+      swiftshader_branch:
+        description: 'Branch do external-swiftshader a tentar (o mais antigo disponivel tende a ter mais chance de compilar com o toolchain do 4.4)'
+        required: false
+        default: 'nougat-x86'
+
+jobs:
+  build-and-port:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Liberar espaço em disco
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/.ghcup \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          df -h /
+
+      - name: Instalar dependências
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git curl gnupg flex bison build-essential zip unzip \
+            zlib1g-dev gcc-multilib g++-multilib \
+            libc6-dev-i386 lib32ncurses5-dev lib32z1-dev \
+            x11proto-core-dev libx11-dev libgl1-mesa-dev \
+            libxml2-utils xsltproc python2 python-is-python2 \
+            bc mtools syslinux-utils libssl-dev fontconfig \
+            openjdk-8-jdk
+
+      - name: Instalar repo tool
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -sS https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Configurar git
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "GitHub Actions"
+          git config --global color.ui false
+
+      - name: repo init (kitkat-x86)
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p android-x86-src
+          cd android-x86-src
+          repo init -u git://git.osdn.net/gitroot/android-x86/manifest -b kitkat-x86
+
+      - name: repo sync (com retry)
+        working-directory: ${{ github.workspace }}/android-x86-src
+        run: |
+          for i in 1 2 3 4 5; do
+            repo sync -c -j4 --no-tags --no-clone-bundle --force-sync && break
+            echo "repo sync falhou (tentativa $i), tentando de novo em 15s..."
+            sleep 15
+          done
+
+      # ------------------------------------------------------------------
+      # PASSO DE PORTABILIDADE: enxertar o SwiftShader
+      # ------------------------------------------------------------------
+      - name: 'Portar: clonar external-swiftshader do servidor android-x86'
+        working-directory: ${{ github.workspace }}/android-x86-src/external
+        continue-on-error: true
+        run: |
+          git clone git://git.osdn.net/gitroot/android-x86/external-swiftshader.git swiftshader
+          cd swiftshader
+          git branch -a
+          git checkout "${{ github.event.inputs.swiftshader_branch }}" || \
+            (echo "Branch ${{ github.event.inputs.swiftshader_branch }} nao encontrado, listando branches disponiveis acima - ajuste o input e rode de novo")
+
+      - name: 'Portar: registrar swiftshader no build (Android.mk do produto)'
+        working-directory: ${{ github.workspace }}/android-x86-src
+        continue-on-error: true
+        run: |
+          set -x
+          # Procura onde o egl.cfg e/ou as libs EGL sao referenciadas nos
+          # arquivos de produto do device x86, pra termos pontos de partida
+          # pra edicao manual caso o build reclame de swiftshader nao estar
+          # "plugado".
+          grep -rl "egl.cfg" device/generic/x86 2>/dev/null | tee /tmp/egl_cfg_refs.txt || true
+          find device/generic/x86 -iname "egl.cfg" -exec cat {} \; | tee /tmp/egl_cfg_atual.txt || true
+          echo "--- Arquivos acima sao ponto de partida para wiring manual do swiftshader ---"
+
+      # ------------------------------------------------------------------
+      # BUILD (não aborta o job se falhar - queremos o log)
+      # ------------------------------------------------------------------
+      - name: Compilar (tentativa - swiftshader pode nao compilar de primeira)
+        id: build
+        continue-on-error: true
+        working-directory: ${{ github.workspace }}/android-x86-src
+        run: |
+          export ALLOW_MISSING_DEPENDENCIES=true
+          source build/envsetup.sh
+          lunch android_x86-eng
+          make iso_img -j"${{ github.event.inputs.jobs }}" 2>&1 | tee /tmp/build.log
+
+      - name: Salvar log de build + info do swiftshader como artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log-e-diagnosticos
+          path: |
+            /tmp/build.log
+            /tmp/egl_cfg_refs.txt
+            /tmp/egl_cfg_atual.txt
+          retention-days: 14
+
+      - name: Localizar ISO gerada (se o build deu certo)
+        working-directory: ${{ github.workspace }}/android-x86-src
+        run: |
+          find out/target/product -maxdepth 2 -name "*.iso" -exec ls -lh {} \; || true
+
+      - name: Upload da ISO (se existir)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-x86-4.4-swiftshader-porting-attempt
+          path: ${{ github.workspace }}/android-x86-src/out/target/product/*/android_x86.iso
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Resultado
+        if: always()
+        run: |
+          if [ "${{ steps.build.outcome }}" = "success" ]; then
+            echo "Build passou! Teste no boot se aparece 'renderer: Google SwiftShader'"
+            echo "e 'OpenGL ES 2.0' no logcat/SurfaceFlinger."
+          else
+            echo "Build falhou (esperado ser possivel na 1a tentativa)."
+            echo "Baixe o artifact 'build-log-e-diagnosticos':"
+            echo "  - build.log: onde exatamente travou a compilacao"
+            echo "  - egl_cfg_atual.txt: como o 4.4 configura o driver EGL hoje,"
+            echo "    ponto de partida pra apontar manualmente pro swiftshader"
+            echo "Me manda os erros que a gente vai patchando ponto a ponto."
