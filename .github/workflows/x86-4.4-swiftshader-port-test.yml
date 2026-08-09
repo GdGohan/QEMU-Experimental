@@ -6,7 +6,7 @@ on:
       jobs:
         description: "Numero de jobs paralelos do make (-j)"
         required: false
-        default: "2"
+        default: "1"
         type: string
 
       swiftshader_ref:
@@ -193,7 +193,7 @@ jobs:
 
             if repo sync \
               -c \
-              -j2 \
+              -j1 \
               --no-tags \
               --no-clone-bundle \
               --force-sync \
