@@ -168,7 +168,7 @@ jobs:
           cd android-x86-src
 
           repo init \
-            -u https://git.code.sf.net/p/android-x86/manifest \
+            -u https://git.osdn.net/gitroot/android-x86/manifest \
             -b android-x86-4.4-r5
 
       # ============================================================
