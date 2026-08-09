@@ -1,490 +1,581 @@
-name: Build Android-x86 4.4 KitKat + SwiftShader GLES2 software fallback
+name: Build Android-x86 4.4 + SwiftShader GLES2
 
 on:
-workflow_dispatch:
-inputs:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "Numero de jobs paralelos do make (-j)"
+        required: false
+        default: "2"
+        type: string
+
+      swiftshader_ref:
+        description: "Commit do SwiftShader legado"
+        required: false
+        default: "40586720c2da48d4bb1ddf936204fd6eab2d54a9"
+        type: string
+
 jobs:
-description: 'Numero de jobs paralelos do make (-j)'
-required: false
-default: '2'
-
-  swiftshader_ref:
-    description: 'Commit/tag do SwiftShader legado a usar'
-    required: false
-    default: '40586720c2da48d4bb1ddf936204fd6eab2d54a9'
-
-jobs:
-build-and-port:
-runs-on: ubuntu-22.04
-timeout-minutes: 350
-
-steps:
-
-  # ================================================================
-  # ESPACO
-  # ================================================================
-
-  - name: Liberar espaco
-    run: |
-      sudo rm -rf \
-        /usr/share/dotnet \
-        /usr/local/lib/android \
-        /opt/ghc \
-        /opt/hostedtoolcache/CodeQL \
-        /usr/local/.ghcup \
-        /usr/local/share/boost \
-        "$AGENT_TOOLSDIRECTORY"
-
-      sudo apt-get clean
-      df -h /
-
-  # ================================================================
-  # DEPENDENCIAS
-  # ================================================================
-
-  - name: Instalar dependencias
-    run: |
-      sudo apt-get update
-
-      sudo apt-get install -y \
-        git curl gnupg flex bison build-essential zip unzip \
-        zlib1g-dev gcc-multilib g++-multilib \
-        libc6-dev-i386 lib32ncurses5-dev lib32z1-dev \
-        x11proto-core-dev libx11-dev libgl1-mesa-dev \
-        libxml2-utils xsltproc \
-        bc mtools syslinux-utils \
-        libssl-dev fontconfig \
-        python2 python-is-python2
-
-      # KitKat oficialmente requer Java 6.
-      # O Ubuntu atual nao fornece OpenJDK 6 diretamente,
-      # portanto instalamos o Java 8 apenas como fallback e
-      # tentamos obter um JDK 6/compativel abaixo.
-
-      sudo apt-get install -y openjdk-8-jdk
-
-  # ================================================================
-  # REPO
-  # ================================================================
-
-  - name: Instalar repo
-    run: |
-      mkdir -p "$HOME/bin"
-
-      curl -sS \
-        https://storage.googleapis.com/git-repo-downloads/repo \
-        -o "$HOME/bin/repo"
-
-      chmod a+x "$HOME/bin/repo"
-
-      echo "$HOME/bin" >> "$GITHUB_PATH"
-
-  # ================================================================
-  # GIT
-  # ================================================================
-
-  - name: Configurar git
-    run: |
-      git config --global user.email "ci@example.com"
-      git config --global user.name "Android-x86 SwiftShader CI"
-      git config --global color.ui false
-
-  # ================================================================
-  # ANDROID-X86 KITKAT
-  # ================================================================
-
-  - name: repo init KitKat
-    working-directory: ${{ github.workspace }}
-    run: |
-      mkdir -p android-x86-src
-      cd android-x86-src
-
-      repo init \
-        -u git://git.osdn.net/gitroot/android-x86/manifest \
-        -b kitkat-x86
-
-  - name: repo sync
-    working-directory: ${{ github.workspace }}/android-x86-src
-    run: |
-      success=0
-
-      for i in 1 2 3 4 5; do
-        echo "repo sync tentativa $i"
-
-        if repo sync \
-            -c \
-            -j4 \
-            --no-tags \
-            --no-clone-bundle \
-            --force-sync; then
-          success=1
-          break
-        fi
-
-        echo "repo sync falhou. Aguardando..."
-        sleep 15
-      done
-
-      if [ "$success" != "1" ]; then
-        echo "repo sync falhou definitivamente"
-        exit 1
-      fi
-
-  # ================================================================
-  # INSPECIONAR GRAFICOS KITKAT
-  # ================================================================
-
-  - name: Diagnostico da stack grafica KitKat
-    working-directory: ${{ github.workspace }}/android-x86-src
-    run: |
-      mkdir -p /tmp/gfx-diagnostic
-
-      find device -type f \
-        \( -name "egl.cfg" \
-        -o -name "Android.mk" \
-        -o -name "*.mk" \
-        -o -name "*.rc" \) \
-        2>/dev/null \
-        | sort \
-        > /tmp/gfx-diagnostic/files.txt
-
-      grep -Rni \
-        "PixelFlinger\|libGLES\|libEGL\|egl.cfg\|ro.opengles.version" \
-        device frameworks hardware \
-        2>/dev/null \
-        | head -1000 \
-        > /tmp/gfx-diagnostic/graphics-references.txt || true
-
-      find device/generic/x86 \
-        -iname "egl.cfg" \
-        -exec sh -c 'echo "===== $1 ====="; cat "$1"' _ {} \; \
-        > /tmp/gfx-diagnostic/egl.cfg.txt || true
-
-      cat /tmp/gfx-diagnostic/files.txt
-      cat /tmp/gfx-diagnostic/egl.cfg.txt || true
-
-  # ================================================================
-  # SWIFTSHADER
-  #
-  # IMPORTANTE:
-  #
-  # Nao usamos o SwiftShader moderno do Nougat.
-  # Pegamos uma revisao antiga que ainda possui Android.mk
-  # e construcao das bibliotecas GLES.
-  # ================================================================
-
-  - name: Obter SwiftShader legado
-    working-directory: ${{ github.workspace }}/android-x86-src
-    run: |
-      rm -rf external/swiftshader
-
-      git clone \
-        https://android.googlesource.com/platform/external/swiftshader \
-        external/swiftshader
-
-      cd external/swiftshader
-
-      git checkout "${{ github.event.inputs.swiftshader_ref }}"
-
-      echo "SwiftShader selecionado:"
-      git log -1 --oneline
-
-      echo
-      echo "Android.mk encontrados:"
-      find . -name Android.mk -print
-
-      echo
-      echo "Arquivos GLESv2:"
-      find . \
-        \( -name '*GLESv2*' -o -name 'libGLESv2.lds' \) \
-        -print
-
-  # ================================================================
-  # ADAPTAR SWIFTSHADER PARA KITKAT
-  # ================================================================
-
-  - name: Preparar build legacy do SwiftShader
-    working-directory: ${{ github.workspace }}/android-x86-src
-    run: |
-      mkdir -p /tmp/swiftshader
-
-      echo "SDK do Android:"
-      grep -n \
-        "PLATFORM_SDK_VERSION" \
-        build/core/version_defaults.mk \
-        2>/dev/null \
-        || true
-
-      echo
-      echo "Verificando Android.mk do GLESv2..."
-
-      test -f external/swiftshader/src/OpenGL/libGLESv2/Android.mk
-
-      sed -n '1,260p' \
-        external/swiftshader/src/OpenGL/libGLESv2/Android.mk \
-        > /tmp/swiftshader/libGLESv2.Android.mk.txt
-
-      # SwiftShader antigo pode usar clang. KitKat normalmente
-      # espera o toolchain legado, entao registramos exatamente
-      # onde o build falhar caso essa parte precise ser adaptada.
-
-      grep -Rni \
-        "LOCAL_CLANG\|clang\|libc++\|stlport\|-std=c++11" \
-        external/swiftshader \
-        > /tmp/swiftshader/toolchain-references.txt \
-        || true
-
-  # ================================================================
-  # CRIAR PATCH DE INTEGRACAO NO PRODUTO
-  # ================================================================
-
-  - name: Integrar SwiftShader no android_x86
-    working-directory: ${{ github.workspace }}/android-x86-src
-    run: |
-
-      PRODUCT_FILE="device/generic/x86/android_x86.mk"
-
-      if [ ! -f "$PRODUCT_FILE" ]; then
-        echo "Produto esperado nao encontrado:"
-        echo "$PRODUCT_FILE"
-
-        find device -iname '*android*x86*.mk' -o -iname 'device.mk' \
-          | sort \
-          | head -100
-
-        exit 1
-      fi
-
-      cp "$PRODUCT_FILE" /tmp/android_x86.mk.original
-
-      cat >> "$PRODUCT_FILE" <<'EOF'
-
-      #
-      # SwiftShader software GLES2 fallback
-      #
-
-      PRODUCT_PACKAGES += \
-          libEGL_swiftshader \
-          libGLESv1_CM_swiftshader \
-          libGLESv2_swiftshader
-
-      PRODUCT_PROPERTY_OVERRIDES += \
-          ro.opengles.version=131072 \
-          ro.hardware.egl=swiftshader
-
-      EOF
-
-      echo "Produto modificado:"
-      tail -60 "$PRODUCT_FILE"
-
-  # ================================================================
-  # VERIFICAR SE O KITKAT TEM O SISTEMA EGL ESPERADO
-  # ================================================================
-
-  - name: Localizar EGL e PixelFlinger
-    working-directory: ${{ github.workspace }}/android-x86-src
-    run: |
-      {
-        echo "===== EGL CONFIG ====="
-
-        find . \
-          -iname "egl.cfg" \
-          -exec sh -c 'echo "--- $1"; cat "$1"' _ {} \;
-
-        echo
-        echo "===== PIXELFLINGER ====="
-
-        grep -Rni \
-          "PixelFlinger" \
-          frameworks hardware device \
-          2>/dev/null \
-          | head -500 || true
-
-        echo
-        echo "===== EGL LOADER ====="
-
-        grep -Rni \
-          "egl.cfg\|EGL/egl\|libGLESv2" \
-          frameworks/native hardware/libhardware \
-          2>/dev/null \
-          | head -1000 || true
-
-      } | tee /tmp/swiftshader/egl-analysis.txt
-
-  # ================================================================
-  # PATCH AUTOMATICO DO EGL.CFG
-  #
-  # Nao substituimos cegamente o arquivo.
-  # Primeiro salvamos tudo para diagnostico.
-  # ================================================================
-
-  - name: Preparar configuracao EGL fallback
-    working-directory: ${{ github.workspace }}/android-x86-src
-    run: |
-      mkdir -p /tmp/swiftshader/egl
-
-      find device \
-        -name egl.cfg \
-        -print \
-        -exec cp {} /tmp/swiftshader/egl/ \; \
-        2>/dev/null || true
-
-      echo
-      echo "Arquivos egl.cfg encontrados:"
-      find /tmp/swiftshader/egl -type f -print
-
-  # ================================================================
-  # BUILD
-  # ================================================================
-
-  - name: Build Android-x86 KitKat
-    id: build
-    continue-on-error: true
-    working-directory: ${{ github.workspace }}/android-x86-src
-    run: |
-      set -o pipefail
-
-      export ALLOW_MISSING_DEPENDENCIES=true
-
-      source build/envsetup.sh
-
-      lunch android_x86-eng
-
-      echo
-      echo "======================================"
-      echo "BUILD SWIFTSHADER / GLES2"
-      echo "======================================"
-
-      make \
-        libEGL_swiftshader \
-        libGLESv1_CM_swiftshader \
-        libGLESv2_swiftshader \
-        -j"${{ github.event.inputs.jobs }}" \
-        2>&1 | tee /tmp/swiftshader-build.log
-
-      echo
-      echo "======================================"
-      echo "BUILD ISO"
-      echo "======================================"
-
-      make \
-        iso_img \
-        -j"${{ github.event.inputs.jobs }}" \
-        2>&1 | tee /tmp/build.log
-
-  # ================================================================
-  # DIAGNOSTICO POS-BUILD
-  # ================================================================
-
-  - name: Diagnosticar bibliotecas SwiftShader
-    if: always()
-    working-directory: ${{ github.workspace }}/android-x86-src
-    run: |
-      {
-        echo "===== PRODUTOS SWIFTSHADER ====="
-
-        find out \
-          \( -name 'libEGL_swiftshader.so' \
-          -o -name 'libGLESv1_CM_swiftshader.so' \
-          -o -name 'libGLESv2_swiftshader.so' \) \
-          -exec ls -lh {} \; \
-          2>/dev/null || true
-
-        echo
-        echo "===== INSTALACAO EGL ====="
-
-        find out/target/product/android_x86 \
-          -path '*egl*' \
-          -type f \
-          -exec ls -lh {} \; \
-          2>/dev/null || true
-
-        echo
-        echo "===== OPENGL PROPERTIES ====="
-
-        grep -Rni \
-          "ro.opengles.version\|ro.hardware.egl" \
-          out/target/product/android_x86 \
-          2>/dev/null \
-          | head -100 || true
-
-      } | tee /tmp/swiftshader/post-build.txt
-
-  # ================================================================
-  # LOCALIZAR ISO
-  # ================================================================
-
-  - name: Localizar ISO
-    if: always()
-    working-directory: ${{ github.workspace }}/android-x86-src
-    run: |
-      find out/target/product \
-        -maxdepth 3 \
-        -type f \
-        -name '*.iso' \
-        -exec ls -lh {} \; \
-        2>/dev/null || true
-
-  # ================================================================
-  # ARTIFACTS
-  # ================================================================
-
-  - name: Upload diagnosticos
-    if: always()
-    uses: actions/upload-artifact@v4
-    with:
-      name: kitkat-swiftshader-diagnostics
-      path: |
-        /tmp/build.log
-        /tmp/swiftshader-build.log
-        /tmp/swiftshader/**
-        /tmp/gfx-diagnostic/**
-        /tmp/android_x86.mk.original
-      if-no-files-found: warn
-      retention-days: 14
-
-  - name: Upload ISO
-    if: always()
-    uses: actions/upload-artifact@v4
-    with:
-      name: android-x86-4.4-swiftshader-gles2
-      path: |
-        ${{ github.workspace }}/android-x86-src/out/target/product/android_x86/*.iso
-      if-no-files-found: warn
-      retention-days: 7
-
-  # ================================================================
-  # RESULTADO
-  # ================================================================
-
-  - name: Resultado
-    if: always()
-    run: |
-      echo
-      echo "======================================"
-      echo "RESULTADO"
-      echo "======================================"
-
-      if [ "${{ steps.build.outcome }}" = "success" ]; then
-        echo "BUILD OK"
-        echo
-        echo "O proximo teste e verificar no Android:"
-        echo
-        echo "  getprop ro.opengles.version"
-        echo "  getprop ro.hardware.egl"
-        echo
-        echo "Esperado:"
-        echo "  ro.opengles.version = 131072"
-        echo "  ro.hardware.egl = swiftshader"
-        echo
-        echo "E verificar:"
-        echo "  /system/lib/egl/libGLESv2_swiftshader.so"
-      else
-        echo "BUILD FALHOU."
-        echo
-        echo "Baixe:"
-        echo "  kitkat-swiftshader-diagnostics"
-        echo
-        echo "Principal arquivo:"
-        echo "  swiftshader-build.log"
-      fi
+  build-and-port:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+
+      # ==============================================================
+      # ESPACO EM DISCO
+      # ==============================================================
+
+      - name: Liberar espaco em disco
+        run: |
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY"
+
+          sudo apt-get clean
+          df -h /
+
+      # ==============================================================
+      # DEPENDENCIAS
+      # ==============================================================
+
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            git curl gnupg flex bison build-essential zip unzip \
+            zlib1g-dev gcc-multilib g++-multilib \
+            libc6-dev-i386 lib32ncurses5-dev lib32z1-dev \
+            x11proto-core-dev libx11-dev libgl1-mesa-dev \
+            libxml2-utils xsltproc \
+            bc mtools syslinux-utils \
+            libssl-dev fontconfig \
+            python2 python-is-python2 \
+            openjdk-8-jdk
+
+      # ==============================================================
+      # REPO
+      # ==============================================================
+
+      - name: Instalar repo
+        run: |
+          mkdir -p "$HOME/bin"
+
+          curl -sS \
+            https://storage.googleapis.com/git-repo-downloads/repo \
+            -o "$HOME/bin/repo"
+
+          chmod a+x "$HOME/bin/repo"
+
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      # ==============================================================
+      # GIT
+      # ==============================================================
+
+      - name: Configurar git
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "Android-x86 SwiftShader CI"
+          git config --global color.ui false
+
+      # ==============================================================
+      # ANDROID-X86 KITKAT
+      # ==============================================================
+
+      - name: Inicializar Android-x86 KitKat
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p android-x86-src
+          cd android-x86-src
+
+          repo init \
+            -u git://git.osdn.net/gitroot/android-x86/manifest \
+            -b kitkat-x86
+
+      # ==============================================================
+      # REPO SYNC
+      # ==============================================================
+
+      - name: Sincronizar Android-x86
+        working-directory: ${{ github.workspace }}/android-x86-src
+        run: |
+          success=0
+
+          for i in 1 2 3 4 5; do
+            echo "repo sync - tentativa $i"
+
+            if repo sync \
+              -c \
+              -j4 \
+              --no-tags \
+              --no-clone-bundle \
+              --force-sync; then
+
+              success=1
+              break
+            fi
+
+            echo "repo sync falhou."
+            sleep 15
+          done
+
+          if [ "$success" != "1" ]; then
+            echo "repo sync falhou definitivamente."
+            exit 1
+          fi
+
+      # ==============================================================
+      # DIAGNOSTICO DA STACK GRAFICA DO KITKAT
+      # ==============================================================
+
+      - name: Diagnosticar stack grafica
+        working-directory: ${{ github.workspace }}/android-x86-src
+        run: |
+          mkdir -p /tmp/gfx-diagnostic
+
+          find device \
+            -type f \
+            \( \
+              -name "egl.cfg" \
+              -o -name "Android.mk" \
+              -o -name "*.mk" \
+              -o -name "*.rc" \
+            \) \
+            2>/dev/null \
+            | sort \
+            > /tmp/gfx-diagnostic/files.txt
+
+          grep -Rni \
+            "PixelFlinger\|libGLES\|libEGL\|egl.cfg\|ro.opengles.version" \
+            device \
+            frameworks \
+            hardware \
+            2>/dev/null \
+            | head -1000 \
+            > /tmp/gfx-diagnostic/graphics-references.txt || true
+
+          find device/generic/x86 \
+            -iname "egl.cfg" \
+            -exec sh -c \
+              'echo "===== $1 ====="; cat "$1"' \
+              _ {} \; \
+            > /tmp/gfx-diagnostic/egl.cfg.txt || true
+
+          echo "===== egl.cfg ====="
+          cat /tmp/gfx-diagnostic/egl.cfg.txt || true
+
+      # ==============================================================
+      # SWIFTSHADER
+      # ==============================================================
+
+      - name: Baixar SwiftShader legado
+        working-directory: ${{ github.workspace }}/android-x86-src
+        continue-on-error: true
+        run: |
+          rm -rf external/swiftshader
+
+          git clone \
+            https://android.googlesource.com/platform/external/swiftshader \
+            external/swiftshader
+
+          cd external/swiftshader
+
+          git checkout \
+            "${{ github.event.inputs.swiftshader_ref }}"
+
+          echo ""
+          echo "===== SwiftShader ====="
+          git log -1 --oneline
+
+          echo ""
+          echo "===== Android.mk ====="
+          find . -name Android.mk -print
+
+          echo ""
+          echo "===== GLES ====="
+          find . \
+            \( \
+              -name "*GLESv2*" \
+              -o -name "*GLESv1*" \
+              -o -name "*libEGL*" \
+            \) \
+            -print
+
+      # ==============================================================
+      # ANALISAR BUILD DO SWIFTSHADER
+      # ==============================================================
+
+      - name: Analisar SwiftShader
+        working-directory: ${{ github.workspace }}/android-x86-src
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/swiftshader
+
+          if [ -f external/swiftshader/src/OpenGL/libGLESv2/Android.mk ]; then
+            cp \
+              external/swiftshader/src/OpenGL/libGLESv2/Android.mk \
+              /tmp/swiftshader/libGLESv2.Android.mk.txt
+          fi
+
+          grep -Rni \
+            "LOCAL_CLANG\|clang\|libc++\|stlport\|-std=c++11" \
+            external/swiftshader \
+            > /tmp/swiftshader/toolchain-references.txt \
+            2>/dev/null || true
+
+          echo "===== Toolchain references ====="
+          cat /tmp/swiftshader/toolchain-references.txt || true
+
+      # ==============================================================
+      # LOCALIZAR PRODUTO ANDROID-X86
+      # ==============================================================
+
+      - name: Localizar arquivos do produto
+        working-directory: ${{ github.workspace }}/android-x86-src
+        run: |
+          echo "===== Produtos x86 ====="
+
+          find device \
+            -iname "*android*x86*.mk" \
+            -o -iname "device.mk" \
+            2>/dev/null \
+            | sort \
+            | head -100
+
+          echo ""
+          echo "===== egl.cfg ====="
+
+          find device \
+            -name "egl.cfg" \
+            -print \
+            -exec sh -c \
+              'echo "--- $1"; cat "$1"' \
+              _ {} \; \
+            2>/dev/null || true
+
+      # ==============================================================
+      # LOCALIZAR ANDROID_X86.MK
+      # ==============================================================
+
+      - name: Configurar propriedades GLES2
+        working-directory: ${{ github.workspace }}/android-x86-src
+        continue-on-error: true
+        run: |
+          PRODUCT_FILE="device/generic/x86/android_x86.mk"
+
+          if [ ! -f "$PRODUCT_FILE" ]; then
+            echo "Arquivo $PRODUCT_FILE nao encontrado."
+
+            PRODUCT_FILE=$(find device \
+              -iname "android_x86.mk" \
+              -type f \
+              2>/dev/null \
+              | head -1)
+          fi
+
+          if [ -z "$PRODUCT_FILE" ] || [ ! -f "$PRODUCT_FILE" ]; then
+            echo "Nao foi possivel localizar android_x86.mk."
+            exit 0
+          fi
+
+          echo "Produto encontrado:"
+          echo "$PRODUCT_FILE"
+
+          cp "$PRODUCT_FILE" \
+            /tmp/android_x86.mk.original
+
+          cat >> "$PRODUCT_FILE" <<'EOF'
+
+          #
+          # ============================================================
+          # SwiftShader software GLES2
+          # ============================================================
+          #
+
+          PRODUCT_PACKAGES += \
+              libEGL_swiftshader \
+              libGLESv1_CM_swiftshader \
+              libGLESv2_swiftshader
+
+          PRODUCT_PROPERTY_OVERRIDES += \
+              ro.opengles.version=131072 \
+              ro.hardware.egl=swiftshader
+
+          EOF
+
+          echo ""
+          echo "===== Final do produto ====="
+          tail -80 "$PRODUCT_FILE"
+
+      # ==============================================================
+      # ANALISAR EGL LOADER DO KITKAT
+      # ==============================================================
+
+      - name: Analisar EGL loader
+        working-directory: ${{ github.workspace }}/android-x86-src
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/swiftshader/egl
+
+          {
+            echo "===== egl.cfg ====="
+
+            find . \
+              -name "egl.cfg" \
+              -exec sh -c \
+                'echo "--- $1"; cat "$1"' \
+                _ {} \; \
+              2>/dev/null
+
+            echo ""
+            echo "===== PixelFlinger ====="
+
+            grep -Rni \
+              "PixelFlinger" \
+              frameworks \
+              hardware \
+              device \
+              2>/dev/null \
+              | head -500 || true
+
+            echo ""
+            echo "===== libGLES / libEGL ====="
+
+            grep -Rni \
+              "libGLESv2\|libGLESv1_CM\|libEGL" \
+              frameworks/native \
+              hardware/libhardware \
+              2>/dev/null \
+              | head -1000 || true
+
+            echo ""
+            echo "===== egl.cfg references ====="
+
+            grep -Rni \
+              "egl.cfg" \
+              frameworks/native \
+              hardware \
+              device \
+              2>/dev/null \
+              | head -500 || true
+
+          } | tee /tmp/swiftshader/egl-analysis.txt
+
+          find device \
+            -name "egl.cfg" \
+            -exec cp {} /tmp/swiftshader/egl/ \; \
+            2>/dev/null || true
+
+      # ==============================================================
+      # BUILD SWIFTSHADER
+      # ==============================================================
+
+      - name: Compilar bibliotecas SwiftShader
+        id: build_swiftshader
+        continue-on-error: true
+        working-directory: ${{ github.workspace }}/android-x86-src
+        run: |
+          set -o pipefail
+
+          export ALLOW_MISSING_DEPENDENCIES=true
+
+          source build/envsetup.sh
+
+          lunch android_x86-eng
+
+          echo ""
+          echo "=========================================="
+          echo "COMPILANDO SWIFTSHADER GLES"
+          echo "=========================================="
+
+          make \
+            libEGL_swiftshader \
+            libGLESv1_CM_swiftshader \
+            libGLESv2_swiftshader \
+            -j"${{ github.event.inputs.jobs }}" \
+            2>&1 | tee /tmp/swiftshader-build.log
+
+      # ==============================================================
+      # BUILD COMPLETO
+      # ==============================================================
+
+      - name: Compilar ISO Android-x86
+        id: build
+        continue-on-error: true
+        working-directory: ${{ github.workspace }}/android-x86-src
+        run: |
+          set -o pipefail
+
+          export ALLOW_MISSING_DEPENDENCIES=true
+
+          source build/envsetup.sh
+
+          lunch android_x86-eng
+
+          echo ""
+          echo "=========================================="
+          echo "BUILD ISO ANDROID-X86 4.4"
+          echo "=========================================="
+
+          make \
+            iso_img \
+            -j"${{ github.event.inputs.jobs }}" \
+            2>&1 | tee /tmp/build.log
+
+      # ==============================================================
+      # VERIFICAR BIBLIOTECAS
+      # ==============================================================
+
+      - name: Verificar bibliotecas SwiftShader
+        if: always()
+        working-directory: ${{ github.workspace }}/android-x86-src
+        run: |
+          mkdir -p /tmp/swiftshader/post-build
+
+          {
+            echo "===== LIBEGL ====="
+
+            find out \
+              -name "libEGL_swiftshader.so" \
+              -exec ls -lh {} \; \
+              2>/dev/null || true
+
+            echo ""
+            echo "===== LIBGLESv1 ====="
+
+            find out \
+              -name "libGLESv1_CM_swiftshader.so" \
+              -exec ls -lh {} \; \
+              2>/dev/null || true
+
+            echo ""
+            echo "===== LIBGLESv2 ====="
+
+            find out \
+              -name "libGLESv2_swiftshader.so" \
+              -exec ls -lh {} \; \
+              2>/dev/null || true
+
+            echo ""
+            echo "===== EGL DIRECTORY ====="
+
+            find out/target/product/android_x86 \
+              -path "*/egl/*" \
+              -type f \
+              -exec ls -lh {} \; \
+              2>/dev/null || true
+
+            echo ""
+            echo "===== OPENGL PROPERTIES ====="
+
+            grep -Rni \
+              "ro.opengles.version\|ro.hardware.egl" \
+              out/target/product/android_x86 \
+              2>/dev/null \
+              | head -100 || true
+
+          } | tee /tmp/swiftshader/post-build.txt
+
+      # ==============================================================
+      # LOCALIZAR ISO
+      # ==============================================================
+
+      - name: Localizar ISO
+        if: always()
+        working-directory: ${{ github.workspace }}/android-x86-src
+        run: |
+          echo "===== ISOs ====="
+
+          find out/target/product \
+            -maxdepth 3 \
+            -type f \
+            -name "*.iso" \
+            -exec ls -lh {} \; \
+            2>/dev/null || true
+
+      # ==============================================================
+      # ARTIFACT - LOGS
+      # ==============================================================
+
+      - name: Upload diagnosticos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kitkat-swiftshader-diagnostics
+          path: |
+            /tmp/build.log
+            /tmp/swiftshader-build.log
+            /tmp/swiftshader/**
+            /tmp/gfx-diagnostic/**
+            /tmp/android_x86.mk.original
+          if-no-files-found: warn
+          retention-days: 14
+
+      # ==============================================================
+      # ARTIFACT - ISO
+      # ==============================================================
+
+      - name: Upload ISO
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-x86-4.4-swiftshader-gles2
+          path: |
+            ${{ github.workspace }}/android-x86-src/out/target/product/android_x86/*.iso
+          if-no-files-found: warn
+          retention-days: 7
+
+      # ==============================================================
+      # RESULTADO
+      # ==============================================================
+
+      - name: Resultado
+        if: always()
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "RESULTADO"
+          echo "=========================================="
+
+          if [ "${{ steps.build.outcome }}" = "success" ]; then
+
+            echo "BUILD OK"
+            echo ""
+            echo "Teste no Android:"
+            echo ""
+            echo "  getprop ro.opengles.version"
+            echo "  getprop ro.hardware.egl"
+            echo ""
+            echo "Esperado:"
+            echo ""
+            echo "  ro.opengles.version = 131072"
+            echo "  ro.hardware.egl = swiftshader"
+            echo ""
+            echo "Verifique tambem:"
+            echo ""
+            echo "  /system/lib/egl/libGLESv2_swiftshader.so"
+
+          else
+
+            echo "BUILD FALHOU."
+            echo ""
+            echo "Baixe o artifact:"
+            echo ""
+            echo "  kitkat-swiftshader-diagnostics"
+            echo ""
+            echo "Principal arquivo:"
+            echo ""
+            echo "  swiftshader-build.log"
+            echo ""
+            echo "e"
+            echo ""
+            echo "  build.log"
+
+          fi
