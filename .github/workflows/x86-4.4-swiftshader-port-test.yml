@@ -171,8 +171,6 @@ jobs:
             -u https://git.code.sf.net/p/android-x86/manifest \
             -b android-x86-4.4-r5
 
-          repo manifest -r > /tmp/repo-manifest.xml
-
       # ============================================================
       # SYNC
       # ============================================================
@@ -213,6 +211,8 @@ jobs:
             echo "repo sync falhou definitivamente."
             exit 1
           fi
+
+          repo manifest -r > /tmp/repo-manifest.xml
 
       # ============================================================
       # MOSTRAR TOOLCHAIN DO KITKAT
