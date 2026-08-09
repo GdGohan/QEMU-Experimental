@@ -129,9 +129,9 @@ jobs:
         run: |
           mkdir -p android-x86-src
           cd android-x86-src
-
+          
           repo init \
-            -u git://git.osdn.net/gitroot/android-x86/manifest \
+            -u https://git.osdn.net/gitroot/android-x86/manifest \
             -b kitkat-x86
 
       # ==============================================================
