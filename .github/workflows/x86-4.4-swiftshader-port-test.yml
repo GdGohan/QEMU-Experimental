@@ -131,8 +131,10 @@ jobs:
           cd android-x86-src
           
           repo init \
-            -u https://git.osdn.net/gitroot/android-x86/manifest \
+            -u http://scm.osdn.net/gitroot/android-x86/manifest \
             -b kitkat-x86
+
+          repo manifest -r > /tmp/repo-manifest.xml
 
       # ==============================================================
       # REPO SYNC
@@ -141,17 +143,23 @@ jobs:
       - name: Sincronizar Android-x86
         working-directory: ${{ github.workspace }}/android-x86-src
         run: |
+          set -o pipefail
+
           success=0
 
           for i in 1 2 3 4 5; do
-            echo "repo sync - tentativa $i"
+            echo ""
+            echo "======================================"
+            echo "REPO SYNC - TENTATIVA $i"
+            echo "======================================"
 
             if repo sync \
               -c \
-              -j4 \
+              -j2 \
               --no-tags \
               --no-clone-bundle \
-              --force-sync; then
+              --force-sync \
+              2>&1 | tee "/tmp/repo-sync-$i.log"; then
 
               success=1
               break
