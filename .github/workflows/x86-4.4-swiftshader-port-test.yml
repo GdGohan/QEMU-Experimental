@@ -128,32 +128,11 @@ jobs:
           git config --global http.version HTTP/1.1
 
       # ============================================================
-      # TESTAR SOURCEFORGE
-      # ============================================================
-
-      - name: Testar servidor Android-x86
-        run: |
-          set -x
-
-          echo "===== DNS ====="
-
-          getent hosts git.code.sf.net || true
-          getent hosts gitscm.sf.net || true
-
-          echo "===== MANIFEST ====="
-
-          git ls-remote \
-            http://git.code.sf.net/p/android-x86/manifest \
-            2>&1 || true
-
-          echo "===== GITSCM ====="
-
-          git ls-remote \
-            http://gitscm.sf.net/gitroot/android-x86/manifest \
-            2>&1 || true
-
-      # ============================================================
       # ANDROID-X86 4.4
+      # ============================================================
+
+      # ============================================================
+      # ANDROID-X86 4.4  (com fallback de host)
       # ============================================================
 
       - name: Inicializar Android-x86 4.4
@@ -162,14 +141,34 @@ jobs:
           set -eux
 
           rm -rf android-x86-src
-
           mkdir -p android-x86-src
-
           cd android-x86-src
 
-          repo init \
-            -u https://git.osdn.net/gitroot/android-x86/manifest \
-            -b android-x86-4.4-r5
+          manifest_urls=(
+            "https://scm.osdn.net/gitroot/android-x86/manifest"
+            "https://github.com/android-x86-mirror/manifest"
+            "http://scm.osdn.net/gitroot/android-x86/manifest"
+          )
+
+          success=0
+
+          for url in "${manifest_urls[@]}"; do
+            echo "Tentando manifest: $url"
+
+            if repo init -u "$url" -b android-x86-4.4-r5; then
+              success=1
+              echo "OK com: $url"
+              break
+            fi
+
+            echo "Falhou: $url"
+            rm -rf .repo
+          done
+
+          if [ "$success" != "1" ]; then
+            echo "Nenhum host de manifest funcionou."
+            exit 1
+          fi
 
       # ============================================================
       # SYNC
