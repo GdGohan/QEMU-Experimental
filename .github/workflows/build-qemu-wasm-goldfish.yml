@@ -1,153 +1,243 @@
-name: build-qemu-wasm-goldfish
+name: build-qemu-goldfish
+
+# Porta a placa "goldfish" (Android Emulator) para varias versoes do QEMU
+# ao mesmo tempo, num unico workflow:
+#
+#   QEMU 2.9.1  -> Android 2.3.6 (Gingerbread) .. 4.0.x  (kernel goldfish 2.6.29, ARMv5/arm926)
+#   QEMU 3.1.1  -> Android 4.0 .. 4.4          (kernel goldfish 3.4, ARMv7/cortex-a8)
+#   QEMU 4.2.1  -> idem, primeira era com Kconfig
+#   QEMU 5.1.0  -> ultima era com Makefile.objs (meson em hw/ so chega na 5.2)
+#   qemu-wasm   -> QEMU moderno (~9.x) com backend TCG para WebAssembly, era meson
+#
+# As tres eras de build system sao detectadas em tempo de execucao pelo
+# script ci/goldfish-integrate.sh gerado abaixo:
+#
+#   era A (2.9 .. 4.0): hw/*/Makefile.objs  + default-configs/arm-softmmu.mak
+#   era B (4.1 .. 5.1): hw/*/Makefile.objs  + hw/*/Kconfig + configs/devices/...
+#   era C (5.2 .. hoje): hw/*/meson.build   + hw/*/Kconfig + configs/devices/...
+#
+# Layout esperado neste repositorio:
+#
+#   goldfish-patches/
+#     manifest.tsv                  # <arquivo-fonte> <destino-no-qemu> <CONFIG_SYMBOL|->
+#     base/                         # fontes comuns a todas as versoes
+#       hw_arm_goldfish.c ...
+#     qemu-2.9/                     # overlays por era (sobrescrevem base/)
+#       hw_arm_goldfish.c
+#       diffs/*.patch
+#     qemu-3.1/  qemu-4.2/  qemu-5.1/  qemu-modern/
+#
+# Se manifest.tsv nao existir, o workflow gera um manifest padrao com os
+# 5 arquivos originais (goldfish.c, goldfish_pdev_bus.c, goldfish_timer.c
+# e os 2 headers). Se base/ nao existir, os arquivos sao lidos direto de
+# goldfish-patches/ (compatibilidade com o layout antigo).
 
 on:
   workflow_dispatch:
+    inputs:
+      only:
+        description: "Rodar apenas um alvo (ex: 2.9.1, 5.1.0, wasm). Vazio = todos."
+        required: false
+        default: ""
   push:
     branches: [ main ]
     paths:
       - "goldfish-patches/**"
-      - ".github/workflows/build-qemu-wasm-goldfish.yml"
+      - ".github/workflows/build-qemu-goldfish.yml"
 
 jobs:
   build:
+    name: "QEMU ${{ matrix.name }}"
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---------- era A: sem Kconfig, sem meson, configure com python2 ----------
+          - name: "2.9.1"
+            repo: "https://github.com/qemu/qemu.git"
+            ref: "v2.9.1"
+            overlay: "qemu-2.9"
+            mode: "native"
+            image: "debian:stretch"
+            python: "python2.7"
+            android: "2.3.6 - 4.0 (goldfish 2.6.29, arm926)"
+            cpu: "arm926"
+            configure_extra: >-
+              --disable-sdl --disable-gtk --disable-vnc --disable-curses
+              --disable-spice --disable-capstone --disable-libssh2
+              --disable-vhost-net --disable-tpm --audio-drv-list=
+          - name: "3.1.1"
+            repo: "https://github.com/qemu/qemu.git"
+            ref: "v3.1.1"
+            overlay: "qemu-3.1"
+            mode: "native"
+            image: "debian:stretch"
+            python: "python2.7"
+            android: "4.0 - 4.4 (goldfish 3.4, cortex-a8)"
+            cpu: "cortex-a8"
+            configure_extra: >-
+              --disable-sdl --disable-gtk --disable-vnc --disable-curses
+              --disable-spice --disable-capstone --disable-libssh2
+              --disable-vhost-net --disable-tpm --audio-drv-list=
+          # ---------- era B: Kconfig + Makefile.objs, configure com python3 ----------
+          - name: "4.2.1"
+            repo: "https://github.com/qemu/qemu.git"
+            ref: "v4.2.1"
+            overlay: "qemu-4.2"
+            mode: "native"
+            image: "debian:buster"
+            python: "python3"
+            android: "4.0 - 4.4 (goldfish 3.4, cortex-a8)"
+            cpu: "cortex-a8"
+            configure_extra: "--without-default-features --enable-system"
+          - name: "5.1.0"
+            repo: "https://github.com/qemu/qemu.git"
+            ref: "v5.1.0"
+            overlay: "qemu-5.1"
+            mode: "native"
+            image: "debian:buster"
+            python: "python3"
+            android: "4.0 - 4.4 (goldfish 3.4, cortex-a8)"
+            cpu: "cortex-a8"
+            configure_extra: "--without-default-features --enable-system"
+          # ---------- era C: meson + Kconfig, alvo WebAssembly ----------
+          - name: "wasm"
+            repo: "https://github.com/ktock/qemu-wasm.git"
+            ref: ""
+            overlay: "qemu-modern"
+            mode: "wasm"
+            image: ""
+            python: "python3"
+            android: "2.3.6 - 4.4 (via wasm, ARMv5/ARMv7)"
+            cpu: "arm926"
+            configure_extra: >-
+              --static --cpu=wasm32 --cross-prefix= --without-default-features
+              --enable-system --with-coroutine=fiber --disable-tools --disable-docs
+
     steps:
-      # Seu repositorio: precisa conter a pasta goldfish-patches/ com
-      # os arquivos .c/.h e o script integrate-goldfish.sh
       - name: Checkout deste repositorio
+        if: ${{ github.event.inputs.only == '' || github.event.inputs.only == matrix.name }}
         uses: actions/checkout@v4
         with:
           path: patches
 
-      # Base: QEMU moderno + backend TCG para WebAssembly
-      - name: Clonar qemu-wasm
-        run: git clone --depth 1 https://github.com/ktock/qemu-wasm.git qemu-wasm
-
-      # Copia os novos arquivos de dispositivo/maquina goldfish para
-      # dentro da arvore do qemu-wasm
-      - name: Instalar os arquivos da placa goldfish
+      - name: Clonar o QEMU alvo
+        if: ${{ github.event.inputs.only == '' || github.event.inputs.only == matrix.name }}
         run: |
           set -eu
-          SRC=patches/goldfish-patches
-          DST=qemu-wasm
+          if [ -n "${{ matrix.ref }}" ]; then
+            git clone --depth 1 --branch "${{ matrix.ref }}" "${{ matrix.repo }}" qemu
+          else
+            git clone --depth 1 "${{ matrix.repo }}" qemu
+          fi
+          cd qemu
+          git submodule update --init --depth 1 || true
+          echo "--- versao ---"; cat VERSION 2>/dev/null || true
 
-          mkdir -p "$DST/hw/arm" "$DST/hw/timer" \
-                   "$DST/include/hw/timer" "$DST/include/hw/arm"
-
-          cp "$SRC/hw_arm_goldfish.c" "$DST/hw/arm/goldfish.c"
-          cp "$SRC/hw_arm_goldfish_pdev_bus.c" "$DST/hw/arm/goldfish_pdev_bus.c"
-          cp "$SRC/hw_timer_goldfish_timer.c" "$DST/hw/timer/goldfish_timer.c"
-          cp "$SRC/include_hw_timer_goldfish_timer.h" \
-             "$DST/include/hw/timer/goldfish_timer.h"
-          cp "$SRC/include_hw_arm_goldfish_pdev_bus.h" \
-             "$DST/include/hw/arm/goldfish_pdev_bus.h"
-
-      # Registra os arquivos novos no Kconfig/meson.build. Feito por
-      # append idempotente (nao patch de linha) porque nao temos como
-      # validar numero de linha exato sem o checkout real do repo.
-      #
-      # IMPORTANTE: todo o texto multi-linha usado aqui e passado via
-      # printf com '\n' explicito, numa unica linha logica de shell --
-      # de proposito, para nunca ter uma linha com indentacao menor
-      # que a deste bloco "run: |". Um heredoc ou string literal com
-      # quebras de linha reais "cruas" dentro deste bloco fecharia o
-      # bloco YAML mais cedo do que o esperado (qualquer linha com
-      # indentacao abaixo da primeira linha do bloco termina o
-      # literal), e o restante seria interpretado como YAML solto,
-      # quebrando o workflow.
-      - name: Registrar a placa goldfish no build system
+      # Gera os scripts de integracao. Tudo dentro de heredocs com corpo
+      # indentado no mesmo nivel do bloco (o YAML remove a indentacao comum,
+      # entao o shell recebe o script alinhado na coluna 0). Nenhuma linha
+      # abaixo da indentacao base -- caso contrario o bloco literal fecharia
+      # antes da hora e o resto viraria YAML solto.
+      - name: Gerar scripts de integracao
+        if: ${{ github.event.inputs.only == '' || github.event.inputs.only == matrix.name }}
         run: |
           set -eu
-          cd qemu-wasm
+          mkdir -p ci
+          cat > ci/goldfish-integrate.sh <<'INTEGRATE'
+          #!/bin/sh
+          # uso: goldfish-integrate.sh <dir-do-qemu> <dir-goldfish-patches> <overlay>
+          set -eu
+          QEMU="$1"; PATCHDIR="$2"; OVERLAY="${3:-}"
 
-          add_once() {
-            # add_once <arquivo> <marcador-de-idempotencia> <texto>
-            file="$1"; marker="$2"; text="$3"
-            if ! grep -qF "$marker" "$file" 2>/dev/null; then
-              printf '%s\n' "$text" >> "$file"
-            fi
+          MANIFEST="$PATCHDIR/manifest.tsv"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "ERRO: $MANIFEST nao existe." >&2
+            echo "      O manifest e a fonte da verdade de quais arquivos" >&2
+            echo "      entram na arvore e com qual simbolo CONFIG_. Sem ele" >&2
+            echo "      o build passaria compilando nada -- falhar aqui e" >&2
+            echo "      melhor que um binario sem a placa goldfish." >&2
+            exit 1
+          fi
+
+          # ---- 1. copia dos fontes: overlay tem prioridade sobre base/ ----
+          # ordem de busca: <overlay>/  ->  base/  ->  raiz (layout antigo)
+          find_src() {
+            f="$1"
+            for d in \
+              ${OVERLAY:+"$PATCHDIR/$OVERLAY"} \
+              "$PATCHDIR/base" \
+              "$PATCHDIR"
+            do
+              [ -f "$d/$f" ] && { printf '%s\n' "$d/$f"; return 0; }
+            done
+            return 1
           }
 
-          add_once hw/arm/Kconfig "config GOLDFISH" "$(printf 'config GOLDFISH\n    bool\n    select GOLDFISH_PIC\n    select GOLDFISH_TTY\n    select GOLDFISH_TIMER\n    select GOLDFISH_PDEV_BUS\n')"
+          # O simbolo prefixado com @ e o agregador da placa (recebe os
+          # selects dos demais). Default se ninguem marcar: CONFIG_GOLDFISH.
+          SYMBOLS=""
+          BOARD_SYM=""
+          while IFS="$(printf '\t')" read -r src dst sym; do
+            case "$src" in ""|\#*) continue ;; esac
+            found="$(find_src "$src")" || { echo "ERRO: fonte nao encontrado: $src" >&2; exit 1; }
+            mkdir -p "$QEMU/$(dirname "$dst")"
+            cp -v "$found" "$QEMU/$dst"
+            case "$sym" in
+              ""|-) ;;
+              @*)
+                sym="${sym#@}"
+                BOARD_SYM="$sym"
+                SYMBOLS="$SYMBOLS $sym:$dst"
+                ;;
+              *) SYMBOLS="$SYMBOLS $sym:$dst" ;;
+            esac
+          done < "$MANIFEST"
+          [ -n "$BOARD_SYM" ] || BOARD_SYM="CONFIG_GOLDFISH"
+          BOARD_SHORT="$(printf '%s' "$BOARD_SYM" | sed 's/^CONFIG_//')"
+          echo "simbolo agregador da placa: $BOARD_SYM"
 
-          add_once hw/arm/Kconfig "config GOLDFISH_PDEV_BUS" "$(printf 'config GOLDFISH_PDEV_BUS\n    bool\n')"
-
-          add_once hw/timer/Kconfig "config GOLDFISH_TIMER" "$(printf 'config GOLDFISH_TIMER\n    bool\n')"
-
-          add_once hw/arm/meson.build "goldfish.c" "arm_ss.add(when: 'CONFIG_GOLDFISH', if_true: files('goldfish.c'))"
-
-          add_once hw/arm/meson.build "goldfish_pdev_bus.c" "arm_ss.add(when: 'CONFIG_GOLDFISH_PDEV_BUS', if_true: files('goldfish_pdev_bus.c'))"
-
-          add_once hw/timer/meson.build "goldfish_timer.c" "system_ss.add(when: 'CONFIG_GOLDFISH_TIMER', if_true: files('goldfish_timer.c'))"
-
-          DEFCONFIG="configs/devices/arm-softmmu/default.mak"
-          if [ -f "$DEFCONFIG" ]; then
-            add_once "$DEFCONFIG" "CONFIG_GOLDFISH=y" "CONFIG_GOLDFISH=y"
+          # simbolos de terceiros que a placa precisa (ex: SMC91C111)
+          EXTRA_SELECTS=""
+          if [ -f "$PATCHDIR/extra-selects.txt" ]; then
+            EXTRA_SELECTS="$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' \
+                             "$PATCHDIR/extra-selects.txt" | tr -d ' \t')"
           fi
 
-      # Aplica qualquer patch adicional versionado à parte (para
-      # ajustes finos que não caibam no add_once acima)
-      - name: Aplicar patches adicionais (se existirem)
-        run: |
-          set -eu
-          if [ -d patches/goldfish-patches/diffs ]; then
-            cd qemu-wasm
-            for p in ../patches/goldfish-patches/diffs/*.patch; do
-              [ -e "$p" ] || continue
-              echo "Aplicando $p"
-              git apply --3way "$p"
-            done
+          # ---- 2. deteccao da era do build system ----
+          cd "$QEMU"
+
+          # Versao real da arvore, lida do arquivo VERSION (existe em todas
+          # as versoes e tambem nos forks: o qemu-wasm do ktock diz 8.2.0).
+          # A camada de compatibilidade se recusa a compilar sem isto, de
+          # proposito -- adivinhar versao gera bug silencioso.
+          if [ ! -f VERSION ]; then
+            echo "ERRO: $QEMU/VERSION nao existe -- nao da para saber a versao" >&2
+            echo "      do QEMU. Passe GF_FORCE_VERSION=x.y no ambiente." >&2
+            [ -n "${GF_FORCE_VERSION:-}" ] || exit 1
           fi
-
-      # O Dockerfile do qemu-wasm fixa ZLIB_VERSION=1.3.1 e baixa de
-      # https://zlib.net/zlib-1.3.1.tar.xz. O zlib.net so mantem a
-      # ultima versao nesse caminho direto (hoje 1.3.2) e move
-      # versoes antigas para /fossils/ -- por isso a URL antiga passou
-      # a devolver uma pagina de erro em vez do .tar.xz, e o "tar xJ"
-      # falha com "File format not recognized". Corrige apontando pro
-      # caminho de fossils; se isso tambem falhar no futuro, trocar
-      # pelo mirror do GitHub (github.com/madler/zlib/releases).
-      - name: Corrigir URL do zlib no Dockerfile do qemu-wasm
-        run: |
-          set -eu
-          # fossils/ só guarda .tar.gz, não .tar.xz — então trocamos
-          # a extensão e a flag do tar (xJC -> xzC) junto com o host
-          sed -i -E \
-            -e 's#https://zlib\.net/zlib-\$\{?ZLIB_VERSION\}?\.tar\.xz#https://zlib.net/fossils/zlib-${ZLIB_VERSION}.tar.gz#' \
-            -e 's#(curl[^|]*zlib[^|]*\|\s*tar\s+)xJC#\1xzC#' \
-            qemu-wasm/Dockerfile
-          grep -n "zlib.net\|tar x" qemu-wasm/Dockerfile || true
-
-      - name: Build da imagem de toolchain (emsdk + libs)
-        run: docker build -t buildqemu -f qemu-wasm/Dockerfile qemu-wasm
-
-      - name: Compilar QEMU (goldfish) para WebAssembly
-        run: |
-          docker run --rm \
-            -v ${{ github.workspace }}/qemu-wasm:/qemu \
-            buildqemu \
-            /bin/bash -lc '
-              cd /qemu &&
-              emconfigure ./configure \
-                --static \
-                --cpu=wasm32 \
-                --cross-prefix= \
-                --target-list=arm-softmmu \
-                --without-default-features \
-                --enable-system \
-                --with-coroutine=fiber \
-                --disable-tools \
-                --disable-docs \
-                --extra-cflags="-DNDEBUG -Wno-error=unused-command-line-argument" \
-                --extra-cxxflags="-Wno-error=unused-command-line-argument" &&
-              emmake make -j$(nproc)
-            '
-
-      - name: Upload dos artefatos wasm
-        uses: actions/upload-artifact@v4
-        with:
-          name: qemu-wasm-goldfish-build
-          path: |
-            qemu-wasm/build/**/*.wasm
-            qemu-wasm/build/**/*.js
-          if-no-files-found: warn
+          GF_VER="${GF_FORCE_VERSION:-$(tr -d ' \n' < VERSION)}"
+          GF_VMAJ="$(printf '%s' "$GF_VER" | cut -d. -f1)"
+          GF_VMIN="$(printf '%s' "$GF_VER" | cut -d. -f2)"
+          echo "versao da arvore QEMU: $GF_VER (major=$GF_VMAJ minor=$GF_VMIN)"
+          mkdir -p include/hw/goldfish
+          {
+            echo '/* gerado por ci/goldfish-integrate.sh -- nao editar */'
+            echo '#ifndef HW_GOLDFISH_GF_VERSION_H'
+            echo '#define HW_GOLDFISH_GF_VERSION_H'
+            echo "#define GF_VER_MAJOR $GF_VMAJ"
+            echo "#define GF_VER_MINOR $GF_VMIN"
+            echo '#endif'
+          } > include/hw/goldfish/gf-version.h
+          if [ -f hw/arm/meson.build ]; then
+            BUILDSYS="meson"
+          elif [ -f hw/arm/Makefile.objs ]; then
+            BUILDSYS="makefile"
+          else
+            echo "ERRO: nem hw/arm/meson.build nem hw/arm/Makefile.objs" >&2; exit 1
+          fi
+          if [ -f hw/arm/Kconfig ]; then HAVE_KCONFIG=yes; else HAVE_KCONFIG=no; fi
+          DEFCONFIG=""
+          for f in configs/devices/arm-softmmu/default.mak default-configs/arm-softmmu.mak; do
+            if [ -f "$f" ]
