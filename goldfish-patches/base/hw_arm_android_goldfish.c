@@ -222,7 +222,12 @@ static void goldfish_machine_init(MachineClass *mc)
     mc->ignore_memory_transaction_failures = true;
 #endif
 
-#if GF_ATLEAST(5, 2)
+    /*
+     * Obrigatorio a partir da 5.0: sem default_ram_id o codigo generico nao
+     * cria machine->ram e a placa recebe NULL. Antes da 5.0 o campo nem
+     * existe -- a RAM e alocada na mao pelo GF_BOARD_RAM.
+     */
+#if GF_ATLEAST(5, 0)
     mc->default_ram_id = "goldfish.ram";
 #endif
 

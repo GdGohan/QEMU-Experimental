@@ -155,11 +155,11 @@ typedef CharDriverState Chardev;
 #endif
 
 /*
- * RAM: memory_region_allocate_system_memory() foi removida na 5.2, quando
- * as placas passaram a receber a RAM pronta em machine->ram (habilitado
- * por mc->default_ram_id).
+ * VERIFICADO na arvore: memory_region_allocate_system_memory desapareceu na
+ * 5.0 (nao na 5.2), quando machine->ram + mc->default_ram_id passaram a ser
+ * o unico caminho. Ate a 4.2 a funcao e declarada em hw/boards.h.
  */
-#if GF_ATLEAST(5, 2)
+#if GF_ATLEAST(5, 0)
 #define GF_BOARD_RAM(ms) ((ms)->ram)
 #else
 static inline MemoryRegion *gf_board_ram(MachineState *ms)
@@ -184,9 +184,10 @@ static inline MemoryRegion *gf_board_ram(MachineState *ms)
 #endif
 
 /* ------------------------------------------------------------------ */
-/* realize: qdev_init_nofail() (<=5.2) -> qdev_realize() (>=6.0)        */
+/* realize: qdev_init_nofail() (<=5.0) -> qdev_realize() (>=5.1)        */
+/* VERIFICADO: qdev_init_nofail saiu do qdev-core.h na 5.1, nao na 6.0.  */
 /* ------------------------------------------------------------------ */
-#if GF_ATLEAST(6, 0)
+#if GF_ATLEAST(5, 1)
 #define GF_REALIZE(dev) qdev_realize(DEVICE(dev), NULL, &error_fatal)
 #else
 #define GF_REALIZE(dev) qdev_init_nofail(DEVICE(dev))

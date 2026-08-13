@@ -60,10 +60,10 @@ Mudancas de API ja tratadas:
 | `serial_hds[]` -> `serial_hd()` | 4.0 |
 | `hw/arm/arm.h` -> `hw/arm/boot.h` | 4.1 |
 | `arm_load_kernel()` ganha parametro `MachineState *` | 4.2 |
+| `memory_region_allocate_system_memory()` -> `machine->ram` + `default_ram_id` | 5.0 |
 | `dc->props` -> `device_class_set_props()` | 5.1 |
-| `memory_region_allocate_system_memory()` -> `machine->ram` + `default_ram_id` | 5.2 |
+| `qdev_init_nofail()` -> `qdev_realize()` | 5.1 |
 | `smc91c111_init()` sai de `hw/devices.h` para `hw/net/smc91c111.h` | 5.2 |
-| `qdev_init_nofail()` -> `qdev_realize()` | 6.0 |
 | sourceset `softmmu_ss` -> `system_ss` | 8.x |
 | `class_init` recebe `const void *` | 10.0 |
 
@@ -111,6 +111,14 @@ errado e uso de API inexistente na era em segundos.
 `tools/test-integrate.sh` roda o script de integracao contra arvores QEMU
 simuladas das tres eras de build system, duas vezes cada, e confere que o
 resultado esta correto e que nao duplica linhas.
+
+## Nao passe `-fcommon` para o configure
+
+O configure do QEMU adiciona `-fno-common` de proposito desde a 2.9. Passar
+`-fcommon` por cima faz a definicao tentativa `bool machine_init_done;` de
+`vl.c` virar simbolo COMMON; o linker vai procurar uma definicao forte nos
+arquivos, acha a de `stubs/machine-init-done.c` e arrasta o objeto inteiro,
+resultando em `multiple definition of qemu_add_machine_init_done_notifier`.
 
 ## Limitacoes conhecidas
 

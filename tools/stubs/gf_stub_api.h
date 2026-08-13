@@ -74,8 +74,11 @@ void memory_region_init_io(MemoryRegion *mr, Object *owner,
 void memory_region_add_subregion(MemoryRegion *parent, hwaddr off,
                                  MemoryRegion *sub);
 MemoryRegion *get_system_memory(void);
+/* saiu na 5.0: declarar sempre esconderia erro de fronteira de versao */
+#if !GF_STUB_ATLEAST(5, 0)
 void memory_region_allocate_system_memory(MemoryRegion *mr, Object *owner,
                                           const char *name, uint64_t size);
+#endif
 
 void cpu_physical_memory_read(hwaddr addr, void *buf, uint64_t len);
 void cpu_physical_memory_write(hwaddr addr, const void *buf, uint64_t len);
@@ -116,9 +119,13 @@ void sysbus_init_mmio(SysBusDevice *dev, MemoryRegion *mr);
 void sysbus_init_irq(SysBusDevice *dev, qemu_irq *p);
 DeviceState *sysbus_create_simple(const char *name, hwaddr addr, qemu_irq irq);
 
+/* qdev_init_nofail saiu na 5.1, substituido por qdev_realize */
+#if GF_STUB_ATLEAST(5, 1)
 bool qdev_realize_and_unref(DeviceState *dev, void *bus, Error **errp);
-void qdev_realize(DeviceState *dev, void *bus, Error **errp);
+bool qdev_realize(DeviceState *dev, void *bus, Error **errp);
+#else
 void qdev_init_nofail(DeviceState *dev);
+#endif
 DeviceState *qdev_new(const char *name);
 void sysbus_realize_and_unref(SysBusDevice *dev, Error **errp);
 void sysbus_mmio_map(SysBusDevice *dev, int n, hwaddr addr);
@@ -332,7 +339,9 @@ typedef struct MachineState {
     const char *kernel_filename;
     const char *kernel_cmdline;
     const char *initrd_filename;
-    MemoryRegion *ram;
+#if GF_STUB_ATLEAST(5, 0)
+    MemoryRegion *ram;          /* so existe a partir da 5.0 */
+#endif
 } MachineState;
 
 typedef enum { IF_NONE, IF_SD } BlockInterfaceType;
@@ -342,7 +351,9 @@ typedef struct MachineClass {
     void (*init)(MachineState *ms);
     int max_cpus;
     const char *default_cpu_type;
-    const char *default_ram_id;
+#if GF_STUB_ATLEAST(5, 0)
+    const char *default_ram_id; /* so existe a partir da 5.0 */
+#endif
     uint64_t default_ram_size;
     bool ignore_memory_transaction_failures;
     BlockInterfaceType block_default_type;
