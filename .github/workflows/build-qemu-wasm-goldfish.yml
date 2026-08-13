@@ -63,10 +63,19 @@ jobs:
             python: "python2.7"
             android: "2.3.6 - 4.0 (goldfish 2.6.29, arm926)"
             cpu: "arm926"
+            # ATENCAO: cada versao aceita um conjunto diferente de flags.
+            # --disable-capstone so existe a partir da 3.0 e --disable-libssh2
+            # virou --disable-libssh na 4.0. O build-native.sh descarta
+            # sozinho o que o configure daquela arvore nao conhece, mas manter
+            # a lista certa por era evita surpresa.
             configure_extra: >-
               --disable-sdl --disable-gtk --disable-vnc --disable-curses
-              --disable-spice --disable-capstone --disable-libssh2
-              --disable-vhost-net --disable-tpm --audio-drv-list=
+              --disable-spice --disable-libssh2 --disable-vhost-net
+              --disable-tpm --disable-guest-agent --disable-glusterfs
+              --disable-brlapi --disable-libusb --disable-usb-redir
+              --disable-smartcard --disable-libiscsi --disable-libnfs
+              --disable-seccomp --disable-numa --disable-vde
+              --disable-tools --disable-docs --audio-drv-list=
           - name: "3.1.1"
             repo: "https://github.com/qemu/qemu.git"
             ref: "v3.1.1"
@@ -79,7 +88,11 @@ jobs:
             configure_extra: >-
               --disable-sdl --disable-gtk --disable-vnc --disable-curses
               --disable-spice --disable-capstone --disable-libssh2
-              --disable-vhost-net --disable-tpm --audio-drv-list=
+              --disable-vhost-net --disable-tpm --disable-guest-agent
+              --disable-glusterfs --disable-brlapi --disable-libusb
+              --disable-usb-redir --disable-smartcard --disable-libiscsi
+              --disable-libnfs --disable-seccomp --disable-numa --disable-vde
+              --disable-tools --disable-docs --audio-drv-list=
           # ---------- era B: Kconfig + Makefile.objs, configure com python3 ----------
           - name: "4.2.1"
             repo: "https://github.com/qemu/qemu.git"
@@ -90,7 +103,16 @@ jobs:
             python: "python3"
             android: "4.0 - 4.4 (goldfish 3.4, cortex-a8)"
             cpu: "cortex-a8"
-            configure_extra: "--without-default-features --enable-system"
+            # --without-default-features NAO existe aqui: entrou na 6.0.
+            # Na 4.x/5.x o jeito e desligar cada coisa na mao.
+            configure_extra: >-
+              --disable-sdl --disable-gtk --disable-vnc --disable-curses
+              --disable-spice --disable-capstone --disable-libssh
+              --disable-vhost-net --disable-tpm --disable-guest-agent
+              --disable-glusterfs --disable-brlapi --disable-libusb
+              --disable-usb-redir --disable-smartcard --disable-libiscsi
+              --disable-libnfs --disable-seccomp --disable-numa --disable-vde
+              --disable-tools --disable-docs --audio-drv-list=
           - name: "5.1.0"
             repo: "https://github.com/qemu/qemu.git"
             ref: "v5.1.0"
@@ -100,7 +122,14 @@ jobs:
             python: "python3"
             android: "4.0 - 4.4 (goldfish 3.4, cortex-a8)"
             cpu: "cortex-a8"
-            configure_extra: "--without-default-features --enable-system"
+            configure_extra: >-
+              --disable-sdl --disable-gtk --disable-vnc --disable-curses
+              --disable-spice --disable-capstone --disable-libssh
+              --disable-vhost-net --disable-tpm --disable-guest-agent
+              --disable-glusterfs --disable-brlapi --disable-libusb
+              --disable-usb-redir --disable-smartcard --disable-libiscsi
+              --disable-libnfs --disable-seccomp --disable-numa --disable-vde
+              --disable-tools --disable-docs --audio-drv-list=
           # ---------- era C: meson + Kconfig, alvo WebAssembly ----------
           - name: "wasm"
             repo: "https://github.com/ktock/qemu-wasm.git"
@@ -362,12 +391,31 @@ jobs:
 
           cd /qemu
           PYBIN="$(command -v "$GF_PYTHON" || command -v python3)"
+
+          # As opcoes do configure mudam muito entre 2.9 e 5.1: algumas nem
+          # existiam, outras foram renomeadas (--disable-libssh2 virou
+          # --disable-libssh na 4.0). Uma flag desconhecida NAO e ignorada
+          # pelo QEMU -- ele aborta com "unknown option". Entao conferimos
+          # cada uma contra o proprio script configure e descartamos as que
+          # essa arvore nao conhece, avisando na log.
+          CFG_OK=""
+          for f in $GF_CONFIGURE_EXTRA; do
+            fname="${f%%=*}"
+            if grep -q -- "$fname" configure; then
+              CFG_OK="$CFG_OK $f"
+            else
+              echo "AVISO: $f nao existe no configure desta versao -- ignorando"
+            fi
+          done
+          echo "--- flags aceitas: $CFG_OK"
+
+          # shellcheck disable=SC2086
           ./configure \
             --target-list=arm-softmmu \
             --python="$PYBIN" \
             --disable-werror \
             --extra-cflags="-Wno-error -fcommon" \
-            $GF_CONFIGURE_EXTRA
+            $CFG_OK
           make -j"$(nproc)"
 
           BIN="$(find . -name 'qemu-system-arm' -type f -perm -u+x | head -n1)"
