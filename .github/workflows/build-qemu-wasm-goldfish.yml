@@ -390,6 +390,14 @@ jobs:
           apt-get install -y --no-install-recommends $PKGS
 
           cd /qemu
+
+          # O container roda como root mas /qemu pertence ao uid do runner.
+          # O git recusa ("dubious ownership") e o make perde a string de
+          # versao gerada por scripts/qemu-version.sh. Nao quebra o build,
+          # mas suja a log e some com o hash do commit no --version.
+          git config --global --add safe.directory /qemu || true
+          git config --global --add safe.directory '*' || true
+
           PYBIN="$(command -v "$GF_PYTHON" || command -v python3)"
 
           # As opcoes do configure mudam muito entre 2.9 e 5.1: algumas nem
@@ -409,12 +417,21 @@ jobs:
           done
           echo "--- flags aceitas: $CFG_OK"
 
+          # NAO passar -fcommon aqui. O configure do QEMU coloca -fno-common
+          # desde a 2.9 de proposito: com -fcommon a definicao tentativa
+          # "bool machine_init_done;" em vl.c virou simbolo COMMON, o ld foi
+          # procurar uma definicao forte nos arquivos e achou a de
+          # stubs/machine-init-done.c, arrastando o objeto inteiro -> erro
+          # "multiple definition of qemu_add_machine_init_done_notifier".
+          # As imagens antigas (stretch=gcc6, buster=gcc8) ja usam -fcommon
+          # por padrao no que precisa, entao a flag era so redundante e
+          # perigosa.
           # shellcheck disable=SC2086
           ./configure \
             --target-list=arm-softmmu \
             --python="$PYBIN" \
             --disable-werror \
-            --extra-cflags="-Wno-error -fcommon" \
+            --extra-cflags="-Wno-error" \
             $CFG_OK
           make -j"$(nproc)"
 
