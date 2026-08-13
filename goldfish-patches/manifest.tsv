@@ -1,0 +1,43 @@
+# <arquivo em base/ ou <overlay>/>	<destino na arvore do QEMU>	<CONFIG_SYMBOL ou ->
+#
+# O simbolo prefixado com @ e o agregador da placa: e ele que recebe os
+# "select" de todos os outros no Kconfig e o "=y" no defconfig.
+# Cabecalhos usam "-" (nao geram objeto nem simbolo).
+#
+# Nomes prefixados com android_goldfish_ de proposito: o QEMU 5.1+ ja tem
+# goldfish_rtc e o 5.2+ tem goldfish_pic/goldfish_tty (maquina m68k virt),
+# e colidiriam com os nossos.
+
+# camada de compatibilidade 2.9 -> 9.x
+include_hw_goldfish_compat.h	include/hw/goldfish/compat.h	-
+
+# placa
+hw_arm_android_goldfish.c	hw/arm/android_goldfish.c	@CONFIG_ANDROID_GOLDFISH
+
+# barramento de plataforma (enumera todo o resto para o kernel)
+hw_arm_android_goldfish_pdev_bus.c	hw/arm/android_goldfish_pdev_bus.c	CONFIG_ANDROID_GOLDFISH_PDEV_BUS
+include_hw_arm_android_goldfish_pdev_bus.h	include/hw/arm/android_goldfish_pdev_bus.h	-
+
+# interrupt controller
+hw_intc_android_goldfish_pic.c	hw/intc/android_goldfish_pic.c	CONFIG_ANDROID_GOLDFISH_PIC
+include_hw_intc_android_goldfish_pic.h	include/hw/intc/android_goldfish_pic.h	-
+
+# console serial
+hw_char_android_goldfish_tty.c	hw/char/android_goldfish_tty.c	CONFIG_ANDROID_GOLDFISH_TTY
+include_hw_char_android_goldfish_tty.h	include/hw/char/android_goldfish_tty.h	-
+
+# timer / clocksource
+hw_timer_android_goldfish_timer.c	hw/timer/android_goldfish_timer.c	CONFIG_ANDROID_GOLDFISH_TIMER
+include_hw_timer_android_goldfish_timer.h	include/hw/timer/android_goldfish_timer.h	-
+
+# framebuffer
+hw_display_android_goldfish_fb.c	hw/display/android_goldfish_fb.c	CONFIG_ANDROID_GOLDFISH_FB
+include_hw_display_android_goldfish_fb.h	include/hw/display/android_goldfish_fb.h	-
+
+# teclado / touchscreen
+hw_input_android_goldfish_events.c	hw/input/android_goldfish_events.c	CONFIG_ANDROID_GOLDFISH_EVENTS
+include_hw_input_android_goldfish_events.h	include/hw/input/android_goldfish_events.h	-
+
+# bateria (o Android nao sobe a UI sem alguma fonte de energia)
+hw_misc_android_goldfish_battery.c	hw/misc/android_goldfish_battery.c	CONFIG_ANDROID_GOLDFISH_BATTERY
+include_hw_misc_android_goldfish_battery.h	include/hw/misc/android_goldfish_battery.h	-

@@ -1,0 +1,5 @@
+# Simbolos Kconfig que a placa goldfish precisa mas que NAO sao nossos --
+# um por linha, sem o prefixo CONFIG_. O script de integracao adiciona
+# cada um como "select" no simbolo agregador da placa (eras com Kconfig)
+# ou como "=y" no defconfig (eras 2.9 / 3.1, sem Kconfig).
+SMC91C111
