@@ -240,4 +240,252 @@ jobs:
           if [ -f hw/arm/Kconfig ]; then HAVE_KCONFIG=yes; else HAVE_KCONFIG=no; fi
           DEFCONFIG=""
           for f in configs/devices/arm-softmmu/default.mak default-configs/arm-softmmu.mak; do
-            if [ -f "$f" ]
+            if [ -f "$f" ]; then DEFCONFIG="$f"; break; fi
+          done
+          # nome do sourceset de dispositivos mudou (softmmu_ss -> system_ss) na 8.x
+          SYSSS="system_ss"
+          if [ "$BUILDSYS" = meson ] && ! grep -q "system_ss" hw/timer/meson.build 2>/dev/null; then
+            SYSSS="softmmu_ss"
+          fi
+          echo "build system: $BUILDSYS | Kconfig: $HAVE_KCONFIG | defconfig: ${DEFCONFIG:-nenhum} | sourceset: $SYSSS"
+
+          # add_once: append idempotente por substring
+          add_once() {
+            file="$1"; marker="$2"; text="$3"
+            mkdir -p "$(dirname "$file")"; touch "$file"
+            grep -qF "$marker" "$file" 2>/dev/null || printf '%s\n' "$text" >> "$file"
+          }
+          # add_once_line: idem, mas o marcador precisa casar a LINHA INTEIRA.
+          # Necessario para "config GOLDFISH", que por substring casaria com
+          # "config GOLDFISH_PDEV_BUS" e faria o bloco agregador nunca ser escrito.
+          add_once_line() {
+            file="$1"; marker="$2"; text="$3"
+            mkdir -p "$(dirname "$file")"; touch "$file"
+            grep -qxF "$marker" "$file" 2>/dev/null || printf '%s\n' "$text" >> "$file"
+          }
+
+          # ---- 3. registro de cada objeto + Kconfig + defconfig ----
+          SELECTS=""
+          for entry in $SYMBOLS; do
+            sym="${entry%%:*}"; dst="${entry#*:}"
+            base="$(basename "$dst")"; dir="$(dirname "$dst")"
+            obj="$(printf '%s' "$base" | sed 's/\.c$/.o/')"
+            short="$(printf '%s' "$sym" | sed 's/^CONFIG_//')"
+            [ "$sym" = "$BOARD_SYM" ] || SELECTS="$SELECTS $short"
+
+            if [ "$BUILDSYS" = meson ]; then
+              if [ "$dir" = hw/arm ]; then
+                add_once "$dir/meson.build" "$base" \
+                  "arm_ss.add(when: '$sym', if_true: files('$base'))"
+              else
+                add_once "$dir/meson.build" "$base" \
+                  "$SYSSS.add(when: '$sym', if_true: files('$base'))"
+              fi
+            else
+              if [ "$dir" = hw/arm ]; then
+                add_once "$dir/Makefile.objs" "$obj" "obj-\$($sym) += $obj"
+              else
+                add_once "$dir/Makefile.objs" "$obj" "common-obj-\$($sym) += $obj"
+              fi
+            fi
+
+            if [ "$HAVE_KCONFIG" = yes ] && [ "$sym" != "$BOARD_SYM" ]; then
+              add_once_line "$dir/Kconfig" "config $short" "$(printf 'config %s\n    bool' "$short")"
+            fi
+
+            # sem Kconfig (2.9 / 3.1) o gating vem todo do defconfig
+            if [ "$HAVE_KCONFIG" = no ] && [ -n "$DEFCONFIG" ]; then
+              add_once_line "$DEFCONFIG" "$sym=y" "$sym=y"
+            fi
+          done
+
+          # placa agregadora: um unico CONFIG_GOLDFISH que puxa o resto.
+          # Montado com printf '\n' explicito (nunca com string literal de
+          # varias linhas) para nao gerar linha com indentacao menor que a
+          # do bloco YAML, o que fecharia o literal antes da hora.
+          if [ "$HAVE_KCONFIG" = yes ]; then
+            block="$(printf 'config %s\n    bool' "$BOARD_SHORT")"
+            for s in $SELECTS $EXTRA_SELECTS; do
+              block="$(printf '%s\n    select %s' "$block" "$s")"
+            done
+            add_once_line hw/arm/Kconfig "config $BOARD_SHORT" "$block"
+          elif [ -n "$DEFCONFIG" ]; then
+            # sem Kconfig os simbolos de terceiros vao direto no defconfig
+            for s in $EXTRA_SELECTS; do
+              add_once_line "$DEFCONFIG" "CONFIG_$s=y" "CONFIG_$s=y"
+            done
+          fi
+          # atencao: "[ cond ] && cmd" como ultimo comando derruba o script
+          # inteiro sob set -e quando a condicao e falsa -- usar if/fi
+          if [ -n "$DEFCONFIG" ]; then
+            add_once_line "$DEFCONFIG" "$BOARD_SYM=y" "$BOARD_SYM=y"
+          fi
+
+          echo "--- Kconfig/defconfig resultante ---"
+          grep -n "GOLDFISH" hw/arm/Kconfig ${DEFCONFIG:+"$DEFCONFIG"} 2>/dev/null || true
+
+          # ---- 4. patches adicionais do overlay (ajustes finos por versao) ----
+          for d in ${OVERLAY:+"../patches/goldfish-patches/$OVERLAY/diffs"} "../patches/goldfish-patches/diffs"; do
+            [ -d "$d" ] || continue
+            for p in "$d"/*.patch; do
+              [ -e "$p" ] || continue
+              echo "Aplicando $p"
+              git apply --3way "$p" || { echo "ERRO ao aplicar $p" >&2; exit 1; }
+            done
+          done
+
+          echo "integracao goldfish concluida"
+          INTEGRATE
+          chmod +x ci/goldfish-integrate.sh
+
+          # Script de build nativo, executado DENTRO do container da era certa.
+          # Debian stretch/buster ja sairam dos mirrors normais -> aponta o apt
+          # para archive.debian.org e desliga a checagem de Valid-Until.
+          cat > ci/build-native.sh <<'NATIVE'
+          #!/bin/sh
+          set -eu
+          . /etc/os-release
+          CODENAME="${VERSION_CODENAME:-$(printf '%s' "${VERSION:-}" | sed -n 's/.*(\(.*\)).*/\1/p')}"
+          case "$CODENAME" in
+            jessie|stretch|buster)
+              printf 'deb http://archive.debian.org/debian %s main\n' "$CODENAME" > /etc/apt/sources.list
+              printf 'deb http://archive.debian.org/debian-security %s/updates main\n' "$CODENAME" >> /etc/apt/sources.list
+              printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99no-check-valid
+              ;;
+          esac
+          apt-get update
+          PKGS="build-essential git pkg-config libglib2.0-dev libpixman-1-dev
+                zlib1g-dev libfdt-dev flex bison ca-certificates python3"
+          case "$GF_PYTHON" in python2*) PKGS="$PKGS python2.7" ;; esac
+          # shellcheck disable=SC2086
+          apt-get install -y --no-install-recommends $PKGS
+
+          cd /qemu
+          PYBIN="$(command -v "$GF_PYTHON" || command -v python3)"
+          ./configure \
+            --target-list=arm-softmmu \
+            --python="$PYBIN" \
+            --disable-werror \
+            --extra-cflags="-Wno-error -fcommon" \
+            $GF_CONFIGURE_EXTRA
+          make -j"$(nproc)"
+
+          BIN="$(find . -name 'qemu-system-arm' -type f -perm -u+x | head -n1)"
+          echo "binario: $BIN"
+          echo "--- maquinas com goldfish ---"
+          "$BIN" -M help | grep -i goldfish || {
+            echo "AVISO: a maquina goldfish nao apareceu em -M help" >&2; exit 1; }
+          echo "--- dispositivos goldfish ---"
+          "$BIN" -device help 2>&1 | grep -i goldfish || true
+          mkdir -p /qemu/artifacts
+          cp "$BIN" /qemu/artifacts/
+          NATIVE
+          chmod +x ci/build-native.sh
+
+      # Verificacao rapida antes de gastar ~20 min compilando o QEMU: passa
+      # cada .c pelo parser do C com headers-stub, para a versao ALVO desta
+      # linha da matriz. Pega erro de digitacao e uso de API que nao existe
+      # naquela era em segundos, nao no fim do build.
+      - name: Checar sintaxe dos fontes goldfish
+        if: ${{ github.event.inputs.only == '' || github.event.inputs.only == matrix.name }}
+        run: |
+          if [ -x patches/tools/check-syntax.sh ]; then
+            sh patches/tools/check-syntax.sh
+          else
+            echo "tools/check-syntax.sh ausente -- pulando"
+          fi
+
+      - name: Integrar a placa goldfish na arvore do QEMU
+        if: ${{ github.event.inputs.only == '' || github.event.inputs.only == matrix.name }}
+        run: ci/goldfish-integrate.sh qemu patches/goldfish-patches "${{ matrix.overlay }}"
+
+      # ---------------- caminho nativo (2.9.1 .. 5.1.0) ----------------
+      - name: Build nativo no container da era correta
+        if: ${{ matrix.mode == 'native' && (github.event.inputs.only == '' || github.event.inputs.only == matrix.name) }}
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/qemu:/qemu" \
+            -v "${{ github.workspace }}/ci:/ci:ro" \
+            -e GF_PYTHON="${{ matrix.python }}" \
+            -e GF_CONFIGURE_EXTRA="${{ matrix.configure_extra }}" \
+            "${{ matrix.image }}" \
+            /bin/sh -c "/ci/build-native.sh"
+
+      # Boot test opcional: se o repo tiver tests/android/<algo>/{zImage,ramdisk.img},
+      # tenta subir o kernel goldfish de verdade. Nunca derruba o workflow.
+      - name: Smoke test de boot (opcional)
+        if: ${{ matrix.mode == 'native' && (github.event.inputs.only == '' || github.event.inputs.only == matrix.name) }}
+        continue-on-error: true
+        run: |
+          set -eu
+          KDIR="$(find patches/tests/android -name zImage -printf '%h\n' 2>/dev/null | head -n1 || true)"
+          if [ -z "$KDIR" ]; then echo "sem kernel de teste em tests/android/ -- pulando"; exit 0; fi
+          docker run --rm \
+            -v "${{ github.workspace }}/qemu:/qemu" \
+            -v "${{ github.workspace }}/$KDIR:/k:ro" \
+            "${{ matrix.image }}" \
+            /bin/sh -c '
+              cd /qemu &&
+              timeout 120 ./artifacts/qemu-system-arm \
+                -M goldfish -cpu ${{ matrix.cpu }} -m 256 \
+                -kernel /k/zImage \
+                $([ -f /k/ramdisk.img ] && echo "-initrd /k/ramdisk.img") \
+                -append "console=ttyS0 androidboot.hardware=goldfish qemu=1" \
+                -nographic -no-reboot 2>&1 | tail -n 200
+            '
+
+      # ---------------- caminho WebAssembly (QEMU moderno) ----------------
+      # O Dockerfile do qemu-wasm fixa ZLIB_VERSION=1.3.1 e baixa de
+      # zlib.net/zlib-<v>.tar.xz. O zlib.net mantem so a ultima versao nesse
+      # caminho direto e move as antigas para /fossils/ (onde existe apenas
+      # .tar.gz) -- por isso o "tar xJ" quebrava com "File format not
+      # recognized". Trocamos host, extensao e flag do tar de uma vez.
+      - name: Corrigir URL do zlib no Dockerfile do qemu-wasm
+        if: ${{ matrix.mode == 'wasm' && (github.event.inputs.only == '' || github.event.inputs.only == matrix.name) }}
+        run: |
+          set -eu
+          sed -i -E \
+            -e 's#https://zlib\.net/zlib-\$\{?ZLIB_VERSION\}?\.tar\.xz#https://zlib.net/fossils/zlib-${ZLIB_VERSION}.tar.gz#' \
+            -e 's#(curl[^|]*zlib[^|]*\|\s*tar\s+)xJC#\1xzC#' \
+            qemu/Dockerfile
+          grep -n "zlib.net\|tar x" qemu/Dockerfile || true
+
+      - name: Build da imagem de toolchain (emsdk + libs)
+        if: ${{ matrix.mode == 'wasm' && (github.event.inputs.only == '' || github.event.inputs.only == matrix.name) }}
+        run: docker build -t buildqemu -f qemu/Dockerfile qemu
+
+      - name: Compilar QEMU (goldfish) para WebAssembly
+        if: ${{ matrix.mode == 'wasm' && (github.event.inputs.only == '' || github.event.inputs.only == matrix.name) }}
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/qemu:/qemu" \
+            buildqemu \
+            /bin/bash -lc '
+              cd /qemu &&
+              emconfigure ./configure \
+                --target-list=arm-softmmu \
+                ${{ matrix.configure_extra }} \
+                --extra-cflags="-DNDEBUG -Wno-error=unused-command-line-argument" \
+                --extra-cxxflags="-Wno-error=unused-command-line-argument" &&
+              emmake make -j$(nproc)
+            '
+
+      # ---------------- artefatos ----------------
+      - name: Registrar o diff aplicado na arvore do QEMU
+        if: ${{ always() && (github.event.inputs.only == '' || github.event.inputs.only == matrix.name) }}
+        run: |
+          set -eu
+          cd qemu && git add -A && git diff --cached > ../goldfish-${{ matrix.name }}.diff || true
+          wc -l ../goldfish-${{ matrix.name }}.diff || true
+
+      - name: Upload dos artefatos
+        if: ${{ always() && (github.event.inputs.only == '' || github.event.inputs.only == matrix.name) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-goldfish-${{ matrix.name }}
+          path: |
+            goldfish-${{ matrix.name }}.diff
+            qemu/artifacts/qemu-system-arm
+            qemu/build/**/*.wasm
+            qemu/build/**/*.js
+          if-no-files-found: warn
