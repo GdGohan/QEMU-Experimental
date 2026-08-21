@@ -71,16 +71,36 @@ jobs:
         run: |
           set -euxo pipefail
 
-          git clone --depth 1 --branch OpenSSL_1_1_1w \
-            https://github.com/openssl/openssl.git deps-openssl
-
           export TOOLCHAIN="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64"
           export PATH="${TOOLCHAIN}/bin:${PATH}"
 
+          export ANDROID_API="${API_LEVEL}"
+
+          # OpenSSL 1.1.1 still expects the old GCC-style
+          # Android compiler name. Modern NDKs use Clang.
+          ln -sf \
+            "${TOOLCHAIN}/bin/aarch64-linux-android${ANDROID_API}-clang" \
+            "${TOOLCHAIN}/bin/aarch64-linux-android-gcc"
+
+          ln -sf \
+            "${TOOLCHAIN}/bin/aarch64-linux-android${ANDROID_API}-clang++" \
+            "${TOOLCHAIN}/bin/aarch64-linux-android-g++"
+
+          # Also provide the unversioned names expected by old
+          # OpenSSL build scripts.
+          ln -sf \
+            "${TOOLCHAIN}/bin/aarch64-linux-android${ANDROID_API}-clang" \
+            "${TOOLCHAIN}/bin/aarch64-linux-android-gcc-"
+
+          echo "Compiler:"
+          which aarch64-linux-android-gcc
+          aarch64-linux-android-gcc --version
+
           cd deps-openssl
 
-          ./Configure android-arm64 \
-            shared \
+          ./Configure \
+            android-arm64 \
+            no-shared \
             no-tests \
             no-ssl3 \
             no-comp \
@@ -88,6 +108,16 @@ jobs:
 
           make -j"$(nproc)"
           make install_sw
+
+          echo "OpenSSL libraries:"
+          ls -lh \
+            "${GITHUB_WORKSPACE}/deps/openssl/lib/"
+
+          file \
+            "${GITHUB_WORKSPACE}/deps/openssl/lib/libcrypto.a"
+
+          file \
+            "${GITHUB_WORKSPACE}/deps/openssl/lib/libssl.a"
 
       - name: Build libcurl with OpenSSL
         shell: bash
