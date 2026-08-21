@@ -1,0 +1,302 @@
+name: Build Limbo ARM64 + x86_64 with HTTPS
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  NDK_VERSION: "23.1.7779620"
+  API_LEVEL: "29"
+  BUILD_TOOLS: "29.0.3"
+  USE_QEMU_VERSION: "5.1.0"
+  BUILD_HOST: "arm64-v8a"
+  BUILD_GUEST: "x86_64-softmmu"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Limbo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up Java 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK / NDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-${API_LEVEL}" \
+            "build-tools;${BUILD_TOOLS}" \
+            "ndk;${NDK_VERSION}"
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake autopoint bison flex gettext \
+            libtool libtool-bin pkg-config texinfo rsync \
+            python3 perl ninja-build cmake make git patch \
+            unzip xz-utils
+
+      - name: Export Android toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          echo "NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      # QEMU 5.1.0 in Limbo expects libcurl's curl-config/pkg-config
+      # interface. We build curl + OpenSSL for Android ARM64 and keep
+      # them as shared libraries so QEMU's libqemu-system-x86_64.so
+      # can load them from the APK's lib/arm64-v8a directory.
+
+      - name: Build OpenSSL for Android ARM64
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          git clone --depth 1 --branch OpenSSL_1_1_1w \
+            https://github.com/openssl/openssl.git deps-openssl
+
+          export TOOLCHAIN="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64"
+          export PATH="${TOOLCHAIN}/bin:${PATH}"
+
+          cd deps-openssl
+
+          ./Configure android-arm64 \
+            shared \
+            no-tests \
+            no-ssl3 \
+            no-comp \
+            --prefix="${GITHUB_WORKSPACE}/deps/openssl"
+
+          make -j"$(nproc)"
+          make install_sw
+
+      - name: Build libcurl with OpenSSL
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          git clone --depth 1 --branch curl-7_88_1 \
+            https://github.com/curl/curl.git deps-curl
+
+          export TOOLCHAIN="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64"
+          export PATH="${TOOLCHAIN}/bin:${PATH}"
+
+          export CC="${TOOLCHAIN}/bin/aarch64-linux-android${API_LEVEL}-clang"
+          export CXX="${TOOLCHAIN}/bin/aarch64-linux-android${API_LEVEL}-clang++"
+          export AR="${TOOLCHAIN}/bin/llvm-ar"
+          export RANLIB="${TOOLCHAIN}/bin/llvm-ranlib"
+          export STRIP="${TOOLCHAIN}/bin/llvm-strip"
+
+          export OPENSSL_PREFIX="${GITHUB_WORKSPACE}/deps/openssl"
+
+          cd deps-curl
+          autoreconf -fi
+
+          ./configure \
+            --host=aarch64-linux-android \
+            --prefix="${GITHUB_WORKSPACE}/deps/curl" \
+            --with-openssl="${OPENSSL_PREFIX}" \
+            --enable-shared \
+            --disable-static \
+            --disable-ldap \
+            --disable-ldaps \
+            --disable-rtsp \
+            --disable-dict \
+            --disable-telnet \
+            --disable-tftp \
+            --disable-pop3 \
+            --disable-imap \
+            --disable-smtp \
+            --disable-gopher \
+            --disable-ftp \
+            --disable-file \
+            --disable-libpsl \
+            --disable-brotli \
+            --disable-zstd \
+            --disable-unix-sockets \
+            --disable-manual \
+            --without-libssh2 \
+            --without-libidn2 \
+            --without-nghttp2
+
+          make -j"$(nproc)"
+          make install
+
+      - name: Prepare libcurl pkg-config for QEMU
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          export DEPS="${GITHUB_WORKSPACE}/deps"
+
+          # QEMU 5.1's configure checks libcurl using pkg-config first,
+          # then falls back to curl-config. Make both point at the
+          # Android-built library.
+          mkdir -p "${DEPS}/curl/lib/pkgconfig"
+
+          cat > "${DEPS}/curl/lib/pkgconfig/libcurl.pc" <<EOF
+          prefix=${DEPS}/curl
+          exec_prefix=\${prefix}
+          libdir=\${exec_prefix}/lib
+          includedir=\${prefix}/include
+
+          Name: libcurl
+          Description: libcurl for Limbo Android
+          Version: 7.88.1
+          Libs: -L\${libdir} -lcurl
+          Cflags: -I\${includedir}
+          EOF
+
+          mkdir -p "${DEPS}/bin"
+
+          cat > "${DEPS}/bin/curl-config" <<EOF
+          #!/bin/sh
+          case "\$1" in
+            --cflags)
+              echo "-I${DEPS}/curl/include"
+              ;;
+            --libs)
+              echo "-L${DEPS}/curl/lib -lcurl"
+              ;;
+            --version)
+              echo "7.88.1"
+              ;;
+            *)
+              echo "Usage: curl-config [--cflags|--libs|--version]" >&2
+              exit 1
+              ;;
+          esac
+          EOF
+
+          chmod +x "${DEPS}/bin/curl-config"
+
+          echo "${DEPS}/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=${DEPS}/curl/lib/pkgconfig:${DEPS}/openssl/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "CPPFLAGS=-I${DEPS}/curl/include -I${DEPS}/openssl/include" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-L${DEPS}/curl/lib -L${DEPS}/openssl/lib" >> "$GITHUB_ENV"
+
+      - name: Verify Android curl before QEMU
+        shell: bash
+        run: |
+          set -euxo pipefail
+          pkg-config --modversion libcurl
+          curl-config --version
+          test -f "${GITHUB_WORKSPACE}/deps/curl/lib/libcurl.so"
+          test -f "${GITHUB_WORKSPACE}/deps/openssl/lib/libssl.so"
+          test -f "${GITHUB_WORKSPACE}/deps/openssl/lib/libcrypto.so"
+
+      - name: Enable CURL in Limbo's QEMU configuration
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          CONFIG="limbo-android-lib/src/main/jni/android-config/android-qemu-config.mak"
+
+          # The upstream Android configuration explicitly disables CURL.
+          # Replace only that feature flag; keep the rest of Limbo's
+          # QEMU configuration untouched.
+          sed -i 's/--disable-curl/--enable-curl/g' "$CONFIG"
+
+          grep -n -- '--enable-curl' "$CONFIG"
+
+      - name: Build Limbo native library
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd limbo-android-lib/src/main/jni
+
+          export USE_QEMU_VERSION="${USE_QEMU_VERSION}"
+          export BUILD_HOST="${BUILD_HOST}"
+          export BUILD_GUEST="${BUILD_GUEST}"
+          export NDK_ROOT="${NDK_ROOT}"
+
+          make clean || true
+          make limbo
+
+      - name: Copy HTTPS runtime libraries into Limbo JNI libs
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          DEST="limbo-android-x86/src/main/jniLibs/${BUILD_HOST}"
+          mkdir -p "$DEST"
+
+          cp -av \
+            "${GITHUB_WORKSPACE}/deps/curl/lib/libcurl.so" \
+            "${GITHUB_WORKSPACE}/deps/openssl/lib/libssl.so.1.1" \
+            "${GITHUB_WORKSPACE}/deps/openssl/lib/libcrypto.so.1.1" \
+            "$DEST/"
+
+          # Android's linker resolves SONAMEs, so provide the conventional
+          # unversioned names too.
+          ln -sf libssl.so.1.1 "$DEST/libssl.so"
+          ln -sf libcrypto.so.1.1 "$DEST/libcrypto.so"
+
+          ls -lah "$DEST"
+
+      - name: Verify QEMU library has CURL dependency
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          QEMU_LIB="limbo-android-x86/src/main/jniLibs/${BUILD_HOST}/libqemu-system-x86_64.so"
+
+          if [ ! -f "$QEMU_LIB" ]; then
+            echo "QEMU library not found: $QEMU_LIB"
+            find limbo-android-x86/src/main -name 'libqemu-system-*.so' -print
+            exit 1
+          fi
+
+          readelf -d "$QEMU_LIB" | grep -E 'NEEDED|curl|ssl|crypto' || true
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ./gradlew --no-daemon :limbo-android-x86:assembleRelease
+
+      - name: Locate APK
+        id: apk
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APK="$(find limbo-android-x86/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' | head -n 1)"
+          test -n "$APK"
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+          echo "APK=$APK"
+
+      - name: Verify APK contains HTTPS libraries
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APK="${{ steps.apk.outputs.path }}"
+
+          unzip -l "$APK" | grep -E \
+            'lib/arm64-v8a/(libqemu-system-x86_64|libcurl|libssl|libcrypto).*\.so'
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: limbo-https-arm64-x86_64
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
