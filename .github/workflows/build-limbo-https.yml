@@ -71,54 +71,44 @@ jobs:
         run: |
           set -euxo pipefail
 
+          # Baixa OpenSSL 1.1.1 compatível com o QEMU/Limbo antigo
+          git clone --depth 1 --branch OpenSSL_1_1_1w \
+            https://github.com/openssl/openssl.git deps-openssl
+
           export TOOLCHAIN="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64"
           export PATH="${TOOLCHAIN}/bin:${PATH}"
 
           export ANDROID_API="${API_LEVEL}"
 
-          # OpenSSL 1.1.1 still expects the old GCC-style
-          # Android compiler name. Modern NDKs use Clang.
-          ln -sf \
-            "${TOOLCHAIN}/bin/aarch64-linux-android${ANDROID_API}-clang" \
-            "${TOOLCHAIN}/bin/aarch64-linux-android-gcc"
-
-          ln -sf \
-            "${TOOLCHAIN}/bin/aarch64-linux-android${ANDROID_API}-clang++" \
-            "${TOOLCHAIN}/bin/aarch64-linux-android-g++"
-
-          # Also provide the unversioned names expected by old
-          # OpenSSL build scripts.
-          ln -sf \
-            "${TOOLCHAIN}/bin/aarch64-linux-android${ANDROID_API}-clang" \
-            "${TOOLCHAIN}/bin/aarch64-linux-android-gcc-"
+          export CC="${TOOLCHAIN}/bin/aarch64-linux-android${ANDROID_API}-clang"
+          export CXX="${TOOLCHAIN}/bin/aarch64-linux-android${ANDROID_API}-clang++"
+          export AR="${TOOLCHAIN}/bin/llvm-ar"
+          export RANLIB="${TOOLCHAIN}/bin/llvm-ranlib"
+          export STRIP="${TOOLCHAIN}/bin/llvm-strip"
 
           echo "Compiler:"
-          which aarch64-linux-android-gcc
-          aarch64-linux-android-gcc --version
+          "${CC}" --version
 
           cd deps-openssl
 
           ./Configure \
             android-arm64 \
-            no-shared \
+            shared \
             no-tests \
             no-ssl3 \
             no-comp \
-            --prefix="${GITHUB_WORKSPACE}/deps/openssl"
+            --prefix="${GITHUB_WORKSPACE}/deps/openssl" \
+            --openssldir="${GITHUB_WORKSPACE}/deps/openssl/ssl"
 
           make -j"$(nproc)"
           make install_sw
 
           echo "OpenSSL libraries:"
-          ls -lh \
-            "${GITHUB_WORKSPACE}/deps/openssl/lib/"
+          ls -lah "${GITHUB_WORKSPACE}/deps/openssl/lib/"
 
-          file \
-            "${GITHUB_WORKSPACE}/deps/openssl/lib/libcrypto.a"
-
-          file \
-            "${GITHUB_WORKSPACE}/deps/openssl/lib/libssl.a"
-
+          test -f "${GITHUB_WORKSPACE}/deps/openssl/lib/libcrypto.so.1.1"
+          test -f "${GITHUB_WORKSPACE}/deps/openssl/lib/libssl.so.1.1"
+          
       - name: Build libcurl with OpenSSL
         shell: bash
         run: |
@@ -228,11 +218,18 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+
           pkg-config --modversion libcurl
           curl-config --version
+
           test -f "${GITHUB_WORKSPACE}/deps/curl/lib/libcurl.so"
-          test -f "${GITHUB_WORKSPACE}/deps/openssl/lib/libssl.so"
-          test -f "${GITHUB_WORKSPACE}/deps/openssl/lib/libcrypto.so"
+          test -f "${GITHUB_WORKSPACE}/deps/openssl/lib/libssl.so.1.1"
+          test -f "${GITHUB_WORKSPACE}/deps/openssl/lib/libcrypto.so.1.1"
+
+          file \
+            "${GITHUB_WORKSPACE}/deps/curl/lib/libcurl.so" \
+            "${GITHUB_WORKSPACE}/deps/openssl/lib/libssl.so.1.1" \
+            "${GITHUB_WORKSPACE}/deps/openssl/lib/libcrypto.so.1.1"
 
       - name: Enable CURL in Limbo's QEMU configuration
         shell: bash
